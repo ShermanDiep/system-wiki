@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "system-wiki"
+version = "0.1.0"
+description = "Build a queryable system graph from code, docs, and internal engineering knowledge."
+readme = "README.md"
+license = {text = "Proprietary / TBD"}
+requires-python = ">=3.10"
+keywords = [
+    "knowledge-graph",
+    "codebase",
+    "documentation",
+    "tree-sitter",
+    "context-engine",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "networkx",
+    "tree-sitter",
+    "tree-sitter-python",
+    "tree-sitter-javascript",
+    "tree-sitter-typescript",
+    "tree-sitter-go",
+    "tree-sitter-rust",
+    "tree-sitter-java",
+    "tree-sitter-c",
+    "tree-sitter-cpp",
+    "tree-sitter-ruby",
+    "tree-sitter-c-sharp",
+    "tree-sitter-kotlin",
+    "tree-sitter-scala",
+    "tree-sitter-php",
+    "tree-sitter-swift",
+    "tree-sitter-objc",
+    "tree-sitter-lua",
+    "tree-sitter-zig",
+    "tree-sitter-powershell",
+    "tree-sitter-elixir",
+]
+
+[project.scripts]
+system-wiki = "system_wiki.__main__:main"
+
+[project.optional-dependencies]
+pdf = ["pypdf>=4.0", "html2text"]
+leiden = ["graspologic"]
+office = ["python-docx>=1.0", "openpyxl>=3.1"]
+all = ["pypdf>=4.0", "html2text", "graspologic", "python-docx>=1.0", "openpyxl>=3.1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["system_wiki*"]
+
+[tool.setuptools.package-data]
+system_wiki = ["SKILL.md", "py.typed"]
