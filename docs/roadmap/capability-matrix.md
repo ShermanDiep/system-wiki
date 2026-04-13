@@ -15,10 +15,10 @@ Tai lieu nay chot "done" theo 4 cau hoi lon trong `CODEBASE_UNDERSTANDING_PLAN.m
 
 | Capability | Current | Notes |
 | --- | --- | --- |
-| Explain symbol | Partial | `explain` + summary metadata da co, nhung summary generation chua day du o moi file |
+| Explain symbol | Good | `explain` + summary metadata da co, summary heuristic da phu module/class/function/method |
 | Summary-first task context | Good | `context-for` da group focus/files/tests/docs theo mode |
-| Typed semantic edges | Not started | chua co `validates`, `persists`, `orchestrates`, ... |
-| File/class/function summaries | Partial | dua nhieu vao metadata/existing comments |
+| Typed semantic edges | Good | da co heuristic semantic edges `validates`, `persists`, `orchestrates` va surfacing qua summary metadata |
+| File/class/function summaries | Good | summary heuristic da tong hop tu container, methods, calls, dependencies, callers, va signatures |
 
 ## Dependency And Flow
 
@@ -36,7 +36,8 @@ Tai lieu nay chot "done" theo 4 cau hoi lon trong `CODEBASE_UNDERSTANDING_PLAN.m
 | Direct blast radius | Good | `impact <symbol>` co callers/importers/docs/tests/risk |
 | Change planning | Good | `files-for-change`, `verify-after-change` |
 | Untested impact | Partial | `untested-impact` da co file/module heuristics, chua co test mapping chac chan |
-| Public API boundary risk | Partial | dua nhieu vao dependency graph, chua co boundary model rieng |
+| Public API boundary risk | Good | `impact`, `files-for-change`, `verify-after-change` da co heuristic boundary scoring rieng cho symbol public-facing |
+| Graph diff before/after | Good | `graph-diff <before> [after]` so sanh node/edge/module/file delta giua 2 snapshots |
 
 ## Internal Docs
 
@@ -46,6 +47,7 @@ Tai lieu nay chot "done" theo 4 cau hoi lon trong `CODEBASE_UNDERSTANDING_PLAN.m
 | Typed doc classification | Good | `readme`, `spec`, `design`, `domain`, `adr`, `runbook`, `incident`, `api_contract` |
 | Docs-aware retrieval | Good | `docs-for --mode/--type`, typed doc boosts trong `context-for` |
 | Drift detection | Partial | `doc-drift` da co query-time heuristic cho stale/missing/weak docs, chua co full-repo audit hay semantic drift |
+| Semantic doc extraction | Good | doc hub node da trich `workflow_signals`, `constraint_signals`, `decision_signals` va dua vao summary |
 
 ## Evals
 

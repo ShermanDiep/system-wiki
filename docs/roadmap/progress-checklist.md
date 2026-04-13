@@ -23,8 +23,8 @@ Checklist nay duoc dung de track tien do roadmap o muc implementation + benchmar
 - [x] `explain <symbol>`
 - [x] `context-for <task>` voi `bugfix/feature/refactor/onboarding`
 - [x] Summary-first bundle gom code/tests/docs
-- [ ] Summary generation co he thong o file/class/function
-- [ ] Typed semantic edges cho code
+- [x] Summary generation co he thong o file/class/function
+- [x] Typed semantic edges cho code
 
 ## Dependency + Flow
 
@@ -40,8 +40,8 @@ Checklist nay duoc dung de track tien do roadmap o muc implementation + benchmar
 - [x] `files-for-change <task>`
 - [x] `verify-after-change <task>`
 - [x] `untested-impact <symbol>`
-- [ ] Public API boundary scoring rieng
-- [ ] Graph diff truoc/sau thay doi
+- [x] Public API boundary scoring rieng
+- [x] Graph diff truoc/sau thay doi
 
 ## Internal Docs
 
@@ -50,7 +50,7 @@ Checklist nay duoc dung de track tien do roadmap o muc implementation + benchmar
 - [x] `docs-for --mode/--type`
 - [x] Typed docs duoc dua vao context assembly va impact display
 - [x] Doc-code drift detection (`doc-drift`)
-- [ ] Semantic extraction cho workflow/constraints/decisions
+- [x] Semantic extraction cho workflow/constraints/decisions
 
 ## Evals And Ops
 
@@ -69,6 +69,8 @@ system-wiki eval
 system-wiki eval --compare-baseline docs/evals/baseline.json
 system-wiki query context-for --mode feature "task-aware path ranking and context assembly in query_graph and module_graph"
 system-wiki query docs-for --mode onboarding --type readme main
+system-wiki query semantics query_graph.py
+system-wiki query graph-diff wiki-out/graph-before.json
 system-wiki query verify-after-change --mode feature "task-aware path ranking and context assembly in query_graph and module_graph"
 system-wiki query untested-impact query_graph.py
 ```

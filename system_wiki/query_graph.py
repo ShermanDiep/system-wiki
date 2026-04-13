@@ -180,6 +180,138 @@ def _load_graph(graph_path: str) -> nx.Graph:
         return json_graph.node_link_graph(data, link="links")
 
 
+def _edge_signature(u: str, v: str, data: dict) -> tuple[str, str, str, str, str]:
+    src = data.get("_src", u)
+    tgt = data.get("_tgt", v)
+    return (
+        src,
+        tgt,
+        data.get("relation", ""),
+        data.get("source_file", ""),
+        data.get("source_location", ""),
+    )
+
+
+def _graph_diff_summary(
+    before: nx.Graph,
+    after: nx.Graph,
+    before_label: str = "before",
+    after_label: str = "after",
+) -> str:
+    before_nodes = set(before.nodes())
+    after_nodes = set(after.nodes())
+    added_nodes = after_nodes - before_nodes
+    removed_nodes = before_nodes - after_nodes
+
+    before_edges = {_edge_signature(u, v, data) for u, v, data in before.edges(data=True)}
+    after_edges = {_edge_signature(u, v, data) for u, v, data in after.edges(data=True)}
+    added_edges = after_edges - before_edges
+    removed_edges = before_edges - after_edges
+
+    def node_data(graph: nx.Graph, nid: str) -> dict:
+        return graph.nodes[nid] if nid in graph.nodes else {}
+
+    def code_identity(graph: nx.Graph, nid: str) -> str:
+        data = node_data(graph, nid)
+        return (
+            data.get("qualified_name")
+            or data.get("source_file")
+            or data.get("label")
+            or nid
+        )
+
+    before_files = {data.get("source_file", "") for _, data in before.nodes(data=True) if data.get("source_file")}
+    after_files = {data.get("source_file", "") for _, data in after.nodes(data=True) if data.get("source_file")}
+    added_files = sorted(after_files - before_files)
+    removed_files = sorted(before_files - after_files)
+
+    before_modules = {
+        data.get("qualified_name", "") or data.get("source_file", "")
+        for _, data in before.nodes(data=True)
+        if data.get("symbol_kind") == "module"
+    }
+    after_modules = {
+        data.get("qualified_name", "") or data.get("source_file", "")
+        for _, data in after.nodes(data=True)
+        if data.get("symbol_kind") == "module"
+    }
+    added_modules = sorted(item for item in after_modules - before_modules if item)
+    removed_modules = sorted(item for item in before_modules - after_modules if item)
+
+    file_delta_counts: dict[str, int] = {}
+    for nid in added_nodes:
+        source = node_data(after, nid).get("source_file", "")
+        if source:
+            file_delta_counts[source] = file_delta_counts.get(source, 0) + 1
+    for nid in removed_nodes:
+        source = node_data(before, nid).get("source_file", "")
+        if source:
+            file_delta_counts[source] = file_delta_counts.get(source, 0) - 1
+    for src, tgt, _, source_file, _ in added_edges:
+        source = source_file or node_data(after, src).get("source_file", "") or node_data(after, tgt).get("source_file", "")
+        if source:
+            file_delta_counts[source] = file_delta_counts.get(source, 0) + 1
+    for src, tgt, _, source_file, _ in removed_edges:
+        source = source_file or node_data(before, src).get("source_file", "") or node_data(before, tgt).get("source_file", "")
+        if source:
+            file_delta_counts[source] = file_delta_counts.get(source, 0) - 1
+
+    hotspots = sorted(file_delta_counts.items(), key=lambda item: (-abs(item[1]), item[0]))
+
+    added_symbols = sorted(
+        code_identity(after, nid)
+        for nid in added_nodes
+        if _is_code_symbol(node_data(after, nid))
+    )
+    removed_symbols = sorted(
+        code_identity(before, nid)
+        for nid in removed_nodes
+        if _is_code_symbol(node_data(before, nid))
+    )
+
+    lines = [f"Graph diff: {before_label} -> {after_label}"]
+    lines.append(
+        f"  nodes: {before.number_of_nodes()} -> {after.number_of_nodes()} "
+        f"(delta {after.number_of_nodes() - before.number_of_nodes():+d})"
+    )
+    lines.append(
+        f"  edges: {before.number_of_edges()} -> {after.number_of_edges()} "
+        f"(delta {after.number_of_edges() - before.number_of_edges():+d})"
+    )
+    lines.append(
+        f"  source files: {len(before_files)} -> {len(after_files)} "
+        f"(delta {len(after_files) - len(before_files):+d})"
+    )
+    lines.append(
+        f"  modules: {len(before_modules)} -> {len(after_modules)} "
+        f"(delta {len(after_modules) - len(before_modules):+d})"
+    )
+
+    def add_list(title: str, values: list[str], none_text: str) -> None:
+        lines.append(title)
+        if not values:
+            lines.append(f"  - {none_text}")
+            return
+        for value in values[:5]:
+            lines.append(f"  - {value}")
+
+    add_list("Added files:", added_files, "None")
+    add_list("Removed files:", removed_files, "None")
+    add_list("Added modules:", added_modules, "None")
+    add_list("Removed modules:", removed_modules, "None")
+    add_list("Added symbols:", added_symbols, "None")
+    add_list("Removed symbols:", removed_symbols, "None")
+
+    lines.append("Top changed files:")
+    if not hotspots:
+        lines.append("  - None")
+    else:
+        for source, delta in hotspots[:6]:
+            lines.append(f"  - {source}  structural delta={delta:+d}")
+
+    return "\n".join(lines)
+
+
 def _communities_from_graph(G: nx.Graph) -> dict[int, list[str]]:
     """Reconstruct community dict from community property stored on nodes."""
     communities: dict[int, list[str]] = {}
@@ -363,6 +495,14 @@ def _format_match(G: nx.Graph, nid: str) -> list[str]:
         lines.append(f"    summary: {data['summary']}")
     elif data.get("description"):
         lines.append(f"    doc: {data['description']}")
+    if data.get("semantic_roles"):
+        lines.append(f"    semantic roles: {', '.join(data['semantic_roles'][:4])}")
+    if data.get("workflow_signals"):
+        lines.append(f"    workflow: {' | '.join(data['workflow_signals'][:2])}")
+    if data.get("constraint_signals"):
+        lines.append(f"    constraints: {' | '.join(data['constraint_signals'][:2])}")
+    if data.get("decision_signals"):
+        lines.append(f"    decisions: {' | '.join(data['decision_signals'][:2])}")
     return lines
 
 
@@ -647,6 +787,86 @@ def _is_module_node(data: dict) -> bool:
 
 def _is_code_symbol(data: dict) -> bool:
     return data.get("file_type") == "code" and _node_kind(data) in {"module", "class", "function", "method"}
+
+
+def _is_private_symbol(data: dict) -> bool:
+    name = (data.get("name") or data.get("label") or "").strip().lstrip(".")
+    if name.endswith("()"):
+        name = name[:-2]
+    source = data.get("source_file", "")
+    basename = Path(source).name if source else ""
+    stem = Path(source).stem if source else ""
+
+    if name.startswith("_") and name not in {"__init__", "__main__"}:
+        return True
+    if data.get("symbol_kind") == "module" and (basename.startswith("_") or stem.startswith("_")):
+        return True
+    return False
+
+
+def _public_api_boundary_info(G: nx.Graph, nid: str) -> dict[str, object]:
+    data = G.nodes[nid]
+    if not _is_code_symbol(data):
+        return {"score": 0.0, "risk": "low", "reasons": []}
+
+    score = 0.0
+    reasons: list[str] = []
+    symbol_kind = data.get("symbol_kind", "")
+    source = data.get("source_file", "")
+    qname = data.get("qualified_name", "")
+
+    if _is_test_source(source) or source.endswith((".md", ".rst", ".txt")):
+        return {"score": 0.0, "risk": "low", "reasons": []}
+
+    if symbol_kind == "module":
+        score += 2.5
+        reasons.append("module boundary")
+    elif symbol_kind == "class":
+        score += 2.0
+        reasons.append("class boundary")
+    elif symbol_kind == "function":
+        score += 1.5
+        reasons.append("top-level function")
+    elif symbol_kind == "method":
+        score += 0.5
+
+    if not _is_private_symbol(data):
+        score += 1.5
+        reasons.append("public-looking name")
+
+    cross_file_callers = {
+        src for src, _ in _incoming_edges(G, nid, {"calls"})
+        if G.nodes[src].get("source_file") and G.nodes[src].get("source_file") != source and not _is_test_source(G.nodes[src].get("source_file", ""))
+    }
+    cross_file_importers = {
+        src for src, _ in _incoming_edges(G, nid, {"imports", "imports_from", "uses"})
+        if G.nodes[src].get("source_file") and G.nodes[src].get("source_file") != source and not _is_test_source(G.nodes[src].get("source_file", ""))
+    }
+    doc_refs = {
+        src for src, _ in _incoming_edges(G, nid, {"mentions", "references"})
+        if _is_doc_node(G.nodes[src])
+    }
+
+    if cross_file_callers:
+        score += min(len(cross_file_callers), 4) * 1.2
+        reasons.append(f"{len(cross_file_callers)} external caller(s)")
+    if cross_file_importers:
+        score += min(len(cross_file_importers), 4) * 1.0
+        reasons.append(f"{len(cross_file_importers)} external importer(s)")
+    if doc_refs:
+        score += min(len(doc_refs), 2) * 1.0
+        reasons.append("documented surface")
+    if _looks_like_entrypoint(data):
+        score += 1.5
+        reasons.append("entrypoint-adjacent")
+    if qname.count(".") <= 2 and symbol_kind in {"module", "class", "function"} and len(reasons) < 4:
+        score += 0.5
+        reasons.append("top-level namespace")
+
+    if len(reasons) > 4 and "documented surface" in reasons and "top-level function" in reasons:
+        reasons.remove("top-level function")
+    risk = "high" if score >= 6.0 else "medium" if score >= 3.5 else "low"
+    return {"score": score, "risk": risk, "reasons": reasons[:4]}
 
 
 def _looks_like_entrypoint(data: dict) -> bool:
@@ -1563,6 +1783,7 @@ def _impact_file_rows(
         data = G.nodes[nid]
         title = _node_title(G, nid)
         origin_source = data.get("source_file", "")
+        boundary = _public_api_boundary_info(G, nid)
 
         for src, _ in _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
             src_data = G.nodes[src]
@@ -1579,6 +1800,17 @@ def _impact_file_rows(
                 _node_title(G, src),
             )
             direct_sources.add(source)
+
+        if boundary["risk"] in {"medium", "high"} and origin_source:
+            add_row(
+                verify_scores,
+                verify_reasons,
+                verify_nodes,
+                origin_source,
+                2.5 if boundary["risk"] == "high" else 1.5,
+                f"public API boundary ({boundary['risk']}) for {title}",
+                title,
+            )
 
         module_nid = _module_source_map(G).get(origin_source) if origin_source else None
         target_module_nid = module_nid if module_nid and module_nid in M else None
@@ -1990,7 +2222,14 @@ def _files_for_change_plan(
 
     watch_files = [row for row in impact_rows["watch"] if row[0] not in taken_sources][:4]
 
-    impact_score = len(verify_files) * 2 + len(watch_files) + len(test_files) + len(doc_files)
+    boundary_watch: list[tuple[str, float, list[str]]] = []
+    for nid, _, _ in bundle["focus_symbols"]:
+        boundary = _public_api_boundary_info(G, nid)
+        if boundary["risk"] in {"medium", "high"}:
+            boundary_watch.append((nid, float(boundary["score"]), [f"public API boundary ({boundary['risk']})"] + list(boundary["reasons"])))
+    boundary_files = _aggregate_file_rows(G, boundary_watch, max_files=4)
+
+    impact_score = len(verify_files) * 2 + len(watch_files) + len(test_files) + len(doc_files) + len(boundary_files)
     impact_risk = "high" if impact_score >= 8 else "medium" if impact_score >= 4 else "low"
 
     return {
@@ -2002,6 +2241,7 @@ def _files_for_change_plan(
         "watch_files": watch_files,
         "test_files": test_files,
         "doc_files": doc_files,
+        "boundary_files": boundary_files,
     }
 
 
@@ -2099,6 +2339,15 @@ def cmd_files_for_change(G: nx.Graph, task: str, mode: str | None = None, max_de
             if reasons:
                 lines.append(f"    why: {', '.join(reasons[:3])}")
 
+    if plan["boundary_files"]:
+        lines.append("Public API boundary review:")
+        for source, score, reasons, symbols in plan["boundary_files"][:4]:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
     if watch_files:
         lines.append("Impact watchlist:")
         for source, score, reasons, symbols in watch_files[:4]:
@@ -2185,6 +2434,15 @@ def cmd_verify_after_change(G: nx.Graph, task: str, mode: str | None = None, max
     if verify_plan["doc_drift_watch"]["weak"]:
         lines.append("Weak doc coverage watchlist:")
         for source, score, reasons, symbols in verify_plan["doc_drift_watch"]["weak"][:4]:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
+    if plan["boundary_files"]:
+        lines.append("Public API boundary watchlist:")
+        for source, score, reasons, symbols in plan["boundary_files"][:4]:
             lines.append(f"  - {source}  score={score:.1f}")
             if symbols:
                 lines.append(f"    nodes: {', '.join(symbols[:3])}")
@@ -2301,6 +2559,50 @@ def cmd_explain(G: nx.Graph, label: str) -> str:
         lines.append("  incoming:")
         for src, data in incoming[:8]:
             lines.append(f"    <- {_node_title(G, src)}  [{data.get('relation', '')}]")
+    return "\n".join(lines)
+
+
+def cmd_semantics(G: nx.Graph, label: str) -> str:
+    """Show typed semantic metadata and edges for a code/doc node."""
+    matches = _find_nodes(G, label)
+    if not matches:
+        return f"No node matching '{label}'."
+    nid = matches[0]
+    data = G.nodes[nid]
+    lines = [f"Semantics for {_node_title(G, nid)}:"]
+    lines += _format_match(G, nid)
+
+    if data.get("semantic_roles"):
+        lines.append("  semantic roles:")
+        for role in data["semantic_roles"][:6]:
+            lines.append(f"    - {role}")
+
+    semantic_out = _outgoing_edges(G, nid, {"validates", "persists", "orchestrates"})
+    semantic_in = _incoming_edges(G, nid, {"validates", "persists", "orchestrates"})
+    if semantic_out:
+        lines.append("  semantic edges:")
+        for tgt, edge in semantic_out[:8]:
+            lines.append(f"    -> {_node_title(G, tgt)}  [{edge.get('relation', '')}]")
+    if semantic_in:
+        lines.append("  semantic consumers:")
+        for src, edge in semantic_in[:8]:
+            lines.append(f"    <- {_node_title(G, src)}  [{edge.get('relation', '')}]")
+
+    if data.get("workflow_signals"):
+        lines.append("  workflow signals:")
+        for text in data["workflow_signals"][:4]:
+            lines.append(f"    - {text}")
+    if data.get("constraint_signals"):
+        lines.append("  constraint signals:")
+        for text in data["constraint_signals"][:4]:
+            lines.append(f"    - {text}")
+    if data.get("decision_signals"):
+        lines.append("  decision signals:")
+        for text in data["decision_signals"][:4]:
+            lines.append(f"    - {text}")
+
+    if len(lines) == 1 + len(_format_match(G, nid)):
+        lines.append("  No semantic metadata found.")
     return "\n".join(lines)
 
 
@@ -2875,6 +3177,7 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
     impacted_nodes = {src for src, _ in callers + importers + subclasses + implementers + doc_mentions}
     untested_rows = _untested_impact_file_rows(G, nid, max_depth=3)
     drift_plan = _doc_drift_plan(G, G.nodes[nid].get("qualified_name") or G.nodes[nid].get("source_file") or _node_title(G, nid))
+    boundary = _public_api_boundary_info(G, nid)
     community = G.nodes[nid].get("community")
     bridge_count = sum(1 for other in set(impacted_nodes) | set(transitive_only) if G.nodes[other].get("community") != community)
     doc_type_counts: dict[str, int] = {}
@@ -2892,6 +3195,7 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
         + len(tests)
         + len(transitive_only)
         + bridge_count
+        + (2 if boundary["risk"] == "high" else 1 if boundary["risk"] == "medium" else 0)
     )
     risk = "high" if score >= 10 else "medium" if score >= 4 else "low"
 
@@ -2906,11 +3210,16 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
         f"  docs/spec mentions: {len(doc_mentions)}",
         f"  related tests: {len(tests)}",
         f"  untested impacted files: {len(untested_rows)}",
+        f"  public API boundary: {boundary['risk']} ({boundary['score']:.1f})",
         f"  doc drift: stale={len(drift_plan['stale_docs']) if drift_plan else 0} "
         f"missing={len(drift_plan['missing_docs']) if drift_plan else 0} "
         f"weak={len(drift_plan['weak_links']) if drift_plan else 0}",
         f"  cross-community touches: {bridge_count}",
     ]
+    if boundary["reasons"]:
+        lines.append("  boundary signals:")
+        for reason in boundary["reasons"][:4]:
+            lines.append(f"    - {reason}")
     if callers:
         lines.append("  callers:")
         for src, _ in callers[:5]:
@@ -3000,6 +3309,31 @@ def cmd_search(G: nx.Graph, query: str) -> str:
     return "\n".join(lines)
 
 
+def cmd_graph_diff(
+    G: nx.Graph,
+    before_graph_path: str,
+    after_graph_path: str | None = None,
+    current_graph_path: str = "wiki-out/graph.json",
+) -> str:
+    """Compare graph snapshots and summarize structural changes."""
+    before_path = Path(before_graph_path)
+    if not before_path.exists():
+        return f"Graph not found: {before_graph_path}"
+
+    before = _load_graph(str(before_path))
+    if after_graph_path:
+        after_path = Path(after_graph_path)
+        if not after_path.exists():
+            return f"Graph not found: {after_graph_path}"
+        after = _load_graph(str(after_path))
+        after_label = str(after_path)
+    else:
+        after = G
+        after_label = current_graph_path
+
+    return _graph_diff_summary(before, after, before_label=str(before_path), after_label=after_label)
+
+
 _USAGE = """\
 Usage: system-wiki query <command> [args]
 
@@ -3007,6 +3341,7 @@ Commands:
   search <terms>          Keyword search across all nodes
   definitions <term>      List matching symbol definitions
   references <label>      List incoming references to a node
+  semantics <label>       Show semantic roles/signals for a node
   hierarchy <label>       Show parent/child hierarchy for a symbol/module
   node <label>            Show node details
   explain <label>         Explain a symbol using graph context
@@ -3021,6 +3356,7 @@ Commands:
   extended-by <label>     Show classes extending this node
   implements <label>      Show implementers of an interface/protocol
   impact <label>          Show direct + transitive blast-radius summary
+  graph-diff <before> [after] Compare graph snapshots before/after a change
   files-for-change <task> Suggest code/test/doc files for a task
   verify-after-change <t> Build a post-change verification checklist
   file <path>             Show a file and extracted nodes
@@ -3047,6 +3383,7 @@ Examples:
   system-wiki query search GraphStore
   system-wiki query definitions GraphStore
   system-wiki query references GraphStore
+  system-wiki query semantics GraphStore
   system-wiki query hierarchy GraphStore
   system-wiki query node GraphStore
   system-wiki query explain GraphStore
@@ -3057,6 +3394,7 @@ Examples:
   system-wiki query docs-for --type runbook handle_request
   system-wiki query untested-impact GraphStore
   system-wiki query impact GraphStore
+  system-wiki query graph-diff wiki-out/graph-before.json
   system-wiki query files-for-change --mode refactor "simplify query graph ranking"
   system-wiki query verify-after-change --mode bugfix "fix query path ranking"
   system-wiki query file src/graph_store.py
@@ -3104,6 +3442,8 @@ def query_main(args: list[str], graph_path: str = "wiki-out/graph.json") -> None
         print(cmd_definitions(G, " ".join(rest)))
     elif cmd == "references" and rest:
         print(cmd_references(G, " ".join(rest)))
+    elif cmd == "semantics" and rest:
+        print(cmd_semantics(G, " ".join(rest)))
     elif cmd == "hierarchy" and rest:
         print(cmd_hierarchy(G, " ".join(rest)))
     elif cmd == "node" and rest:
@@ -3151,6 +3491,11 @@ def query_main(args: list[str], graph_path: str = "wiki-out/graph.json") -> None
         print(cmd_implements(G, " ".join(rest)))
     elif cmd == "impact" and rest:
         print(cmd_impact(G, " ".join(rest)))
+    elif cmd == "graph-diff" and rest:
+        if len(rest) == 1:
+            print(cmd_graph_diff(G, rest[0], current_graph_path=graph_path))
+        else:
+            print(cmd_graph_diff(G, rest[0], after_graph_path=rest[1], current_graph_path=graph_path))
     elif cmd == "files-for-change" and rest:
         mode, remaining = _parse_mode_arg(rest)
         depth, remaining = _parse_depth_arg(remaining, default=3)

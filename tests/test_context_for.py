@@ -13,6 +13,7 @@ from system_wiki.query_graph import (
     cmd_hierarchy,
     cmd_impact,
     cmd_references,
+    cmd_semantics,
     cmd_untested_impact,
     cmd_verify_after_change,
 )
@@ -394,6 +395,86 @@ def _build_hierarchy_graph() -> nx.Graph:
     return G
 
 
+def _build_public_api_graph() -> nx.Graph:
+    G = nx.Graph()
+    G.add_node(
+        "api_mod",
+        label="api.py",
+        file_type="code",
+        symbol_kind="module",
+        source_file="app/api.py",
+        source_location="L1",
+        qualified_name="app.api",
+        summary="API module.",
+        community=1,
+    )
+    G.add_node(
+        "public_fn",
+        label="create_order()",
+        file_type="code",
+        symbol_kind="function",
+        source_file="app/api.py",
+        source_location="L5",
+        qualified_name="app.api.create_order",
+        container="app.api",
+        summary="Public order creation API.",
+        community=1,
+    )
+    G.add_node(
+        "router_fn",
+        label="route_request()",
+        file_type="code",
+        symbol_kind="function",
+        source_file="app/router.py",
+        source_location="L8",
+        qualified_name="app.router.route_request",
+        container="app.router",
+        summary="Routes inbound requests.",
+        community=1,
+    )
+    G.add_node(
+        "worker_fn",
+        label="sync_orders()",
+        file_type="code",
+        symbol_kind="function",
+        source_file="jobs/sync.py",
+        source_location="L10",
+        qualified_name="jobs.sync.sync_orders",
+        container="jobs.sync",
+        summary="Background sync job.",
+        community=2,
+    )
+    G.add_node(
+        "main_fn",
+        label="main()",
+        file_type="code",
+        symbol_kind="function",
+        source_file="app/main.py",
+        source_location="L3",
+        qualified_name="app.main.main",
+        container="app.main",
+        summary="CLI entrypoint.",
+        community=1,
+    )
+    G.add_node(
+        "doc_api",
+        label="API Contract",
+        file_type="document",
+        source_file="docs/api-contract.md",
+        source_location="L1",
+        doc_subtype="api_contract",
+        summary="API contract for order creation.",
+        community=3,
+    )
+
+    _add_edge(G, "api_mod", "public_fn", "contains")
+    _add_edge(G, "router_fn", "public_fn", "calls")
+    _add_edge(G, "worker_fn", "public_fn", "uses")
+    _add_edge(G, "main_fn", "router_fn", "calls")
+    _add_edge(G, "doc_api", "public_fn", "references")
+    return G
+
+
 class ContextForTests(unittest.TestCase):
     def test_bugfix_context_surfaces_tests_and_docs(self) -> None:
         graph = _build_graph()
@@ -559,6 +640,62 @@ class ContextForTests(unittest.TestCase):
         self.assertIn("Children:", result)
         self.assertIn("OrderService", result)
         self.assertIn("via contains", result)
+
+    def test_impact_surfaces_public_api_boundary_signals(self) -> None:
+        graph = _build_public_api_graph()
+
+        result = cmd_impact(graph, "create_order")
+
+        self.assertIn("public API boundary: high", result)
+        self.assertIn("boundary signals:", result)
+        self.assertIn("external caller", result)
+        self.assertIn("documented surface", result)
+
+    def test_semantics_surfaces_code_roles_and_edges(self) -> None:
+        graph = _build_public_api_graph()
+        graph.nodes["public_fn"]["semantic_roles"] = ["orchestrates", "persists"]
+        _add_edge(graph, "public_fn", "router_fn", "orchestrates")
+        _add_edge(graph, "worker_fn", "public_fn", "persists")
+
+        result = cmd_semantics(graph, "create_order")
+
+        self.assertIn("Semantics for create_order():", result)
+        self.assertIn("semantic roles:", result)
+        self.assertIn("orchestrates", result)
+        self.assertIn("semantic edges:", result)
+        self.assertIn("route_request()", result)
+        self.assertIn("semantic consumers:", result)
+        self.assertIn("sync_orders()", result)
+
+    def test_semantics_surfaces_doc_signals(self) -> None:
+        graph = _build_graph()
+        graph.nodes["doc_spec"]["workflow_signals"] = ["Validate request, then persist the service state"]
+        graph.nodes["doc_spec"]["constraint_signals"] = ["Requests must include a tenant id"]
+        graph.nodes["doc_spec"]["decision_signals"] = ["We chose module boundaries for request routing"]
+
+        result = cmd_semantics(graph, "Service Feature Spec")
+
+        self.assertIn("Semantics for Service Feature Spec:", result)
+        self.assertIn("workflow signals:", result)
+        self.assertIn("constraint signals:", result)
+        self.assertIn("decision signals:", result)
+
+    def test_files_for_change_includes_public_api_boundary_review(self) -> None:
+        graph = _build_public_api_graph()
+
+        result = cmd_files_for_change(graph, "extend create_order API", mode="feature")
+
+        self.assertIn("Public API boundary review:", result)
+        self.assertIn("app/api.py", result)
+        self.assertIn("public API boundary", result)
+
+    def test_verify_after_change_includes_public_api_boundary_watchlist(self) -> None:
+        graph = _build_public_api_graph()
+
+        result = cmd_verify_after_change(graph, "extend create_order API", mode="feature")
+
+        self.assertIn("Public API boundary watchlist:", result)
+        self.assertIn("app/api.py", result)
 
     def test_doc_drift_feature_surfaces_stale_missing_and_weak_links(self) -> None:
         graph = _build_drift_graph()

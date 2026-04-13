@@ -114,6 +114,8 @@ Neu ban dinh sua `query_graph.py`, nen chay them:
 
 ```bash
 system-wiki query impact query_graph.py
+system-wiki query semantics query_graph.py
+system-wiki query graph-diff wiki-out/graph-before.json
 ```
 
 Vi file nay dang co `risk: high` va lien quan truc tiep den:
@@ -144,6 +146,8 @@ system-wiki query context-for --mode onboarding "<task>"
 system-wiki query files-for-change "<task>"
 system-wiki query verify-after-change --mode feature "<task>"
 system-wiki query impact query_graph.py
+system-wiki query semantics query_graph.py
+system-wiki query graph-diff wiki-out/graph-before.json
 system-wiki eval
 ```
 

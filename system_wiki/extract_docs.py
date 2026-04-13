@@ -32,6 +32,16 @@ _DOC_SUBTYPE_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("domain", ("domain", "business", "glossary", "concepts")),
 ]
 
+_WORKFLOW_HEADING_TERMS = ("workflow", "flow", "process", "steps", "sequence", "rollout")
+_CONSTRAINT_HEADING_TERMS = ("constraint", "constraints", "guardrail", "requirements", "rule", "rules")
+_DECISION_HEADING_TERMS = ("decision", "decisions", "trade-off", "tradeoff", "chosen approach", "approach")
+
+_CONSTRAINT_LINE_HINTS = (
+    "must ", "must not", "should ", "should not", "cannot ", "can't ",
+    "never ", "required ", "requires ", "only ", "do not ", "don't ",
+)
+_DECISION_LINE_HINTS = ("we chose", "we choose", "decision:", "decided to", "chosen ", "prefer ")
+
 
 def _make_id(source_file: str, label: str) -> str:
     """Create a deterministic node ID from source file + label."""
@@ -62,6 +72,12 @@ def _extract_headings(text: str) -> list[tuple[int, str, int]]:
 def _extract_links(text: str) -> list[tuple[str, str]]:
     """Extract (link_text, target) from markdown links."""
     return [(m.group(1), m.group(2)) for m in _LINK_RE.finditer(text)]
+
+
+def _normalize_signal_text(text: str) -> str:
+    text = re.sub(r'^[\s>*-]+', '', text).strip()
+    text = re.sub(r'^\d+\.\s+', '', text)
+    return text.rstrip(" :.-")
 
 
 def _extract_bold_terms(text: str) -> list[str]:
@@ -104,6 +120,59 @@ def _extract_definitions(text: str) -> list[str]:
             continue
         terms.append(term)
     return terms
+
+
+def _extract_semantic_signals(text: str) -> dict[str, list[str]]:
+    """Extract lightweight workflow/constraint/decision signals from prose."""
+    clean = _strip_code_blocks(text)
+    lines = clean.splitlines()
+    current_bucket: str | None = None
+    buckets: dict[str, list[str]] = {
+        "workflow_signals": [],
+        "constraint_signals": [],
+        "decision_signals": [],
+    }
+
+    def add(bucket: str, raw: str) -> None:
+        candidate = _normalize_signal_text(raw)
+        if len(candidate) < 8 or len(candidate) > 200:
+            return
+        if candidate.count("  ") or "\t" in candidate:
+            return
+        alpha = sum(1 for c in candidate if c.isalpha())
+        if alpha < max(4, len(candidate) * 0.35):
+            return
+        if candidate not in buckets[bucket]:
+            buckets[bucket].append(candidate)
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        heading = re.match(r'^(#{1,4})\s+(.+)$', stripped)
+        if heading:
+            title = heading.group(2).lower().strip()
+            if any(term in title for term in _WORKFLOW_HEADING_TERMS):
+                current_bucket = "workflow_signals"
+            elif any(term in title for term in _CONSTRAINT_HEADING_TERMS):
+                current_bucket = "constraint_signals"
+            elif any(term in title for term in _DECISION_HEADING_TERMS):
+                current_bucket = "decision_signals"
+            else:
+                current_bucket = None
+            continue
+
+        if current_bucket and (re.match(r'^[-*]\s+', stripped) or re.match(r'^\d+\.\s+', stripped)):
+            add(current_bucket, stripped)
+            continue
+
+        lower = stripped.lower()
+        if any(hint in lower for hint in _DECISION_LINE_HINTS):
+            add("decision_signals", stripped)
+        if any(hint in lower for hint in _CONSTRAINT_LINE_HINTS):
+            add("constraint_signals", stripped)
+
+    return {key: values[:4] for key, values in buckets.items()}
 
 
 def _normalize_link_target(target: str, source_file: str) -> str | None:
@@ -187,6 +256,7 @@ def extract_doc(path: Path, root: Path | None = None) -> dict:
     text = _read_file_text(path)
     doc_subtype = _infer_doc_subtype(path, text)
     first_heading = _first_meaningful_heading(text)
+    semantic_signals = _extract_semantic_signals(text)
     if not text.strip():
         # No extractable text — create minimal hub node only
         str_path = str(path.relative_to(root)) if root else str(path)
@@ -212,8 +282,21 @@ def extract_doc(path: Path, root: Path | None = None) -> dict:
         "source_file": str_path, "source_location": "L1",
         "doc_subtype": doc_subtype,
         "summary": first_heading or f"{doc_subtype.replace('_', ' ')} document",
+        **semantic_signals,
     })
     seen_ids.add(doc_id)
+
+    signal_summary_parts = []
+    if semantic_signals["workflow_signals"]:
+        signal_summary_parts.append(f"Workflow: {semantic_signals['workflow_signals'][0]}.")
+    if semantic_signals["constraint_signals"]:
+        signal_summary_parts.append(f"Constraint: {semantic_signals['constraint_signals'][0]}.")
+    if semantic_signals["decision_signals"]:
+        signal_summary_parts.append(f"Decision: {semantic_signals['decision_signals'][0]}.")
+    if signal_summary_parts:
+        nodes[0]["summary"] = " ".join(
+            part for part in [nodes[0]["summary"]] + signal_summary_parts if part
+        ).strip()
 
     # Extract h1/h2 headings as section nodes (h3+ too granular)
     headings = _extract_headings(text)

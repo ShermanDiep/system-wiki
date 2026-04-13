@@ -55,6 +55,7 @@ New here?
 system-wiki .                      # build graph
 system-wiki query stats           # summary
 system-wiki query search <term>   # search nodes
+system-wiki query semantics <symbol-or-doc>
 system-wiki query entrypoints     # likely entrypoints/orchestrators
 system-wiki query entrypoints-for extract_public_api
 system-wiki query flow --depth 4 main
@@ -64,6 +65,7 @@ system-wiki query module-path A B # shortest path between modules
 system-wiki query module-hotspots # rank heavily connected modules
 system-wiki query module-bridges  # rank bridge modules
 system-wiki query docs-for --mode onboarding --type readme main
+system-wiki query semantics query_graph.py
 system-wiki query doc-drift --mode feature query_graph.py
 system-wiki query untested-impact <symbol>
 system-wiki query verify-after-change --mode bugfix "<task>"
@@ -75,6 +77,11 @@ system-wiki lint                  # health check
 system-wiki watch .               # rebuild on changes
 system-wiki note "<insight>"      # write back insight
 ```
+
+Useful now:
+
+- `semantics <label>` de xem `semantic_roles` cua code symbol va `workflow/constraint/decision signals` cua document.
+- `graph-diff <before> [after]` de nhin structural delta truoc/sau mot thay doi.
 
 ## Package Layout
 

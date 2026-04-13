@@ -142,6 +142,108 @@ def _looks_like_objc_header(path: Path) -> bool:
     return any(signal in text for signal in signals)
 
 
+_VALIDATE_HINTS = ("validate", "check", "verify", "sanitize", "guard", "assert")
+_PERSIST_HINTS = ("save", "store", "persist", "write", "commit", "insert", "update", "delete", "sync")
+_ORCHESTRATE_HINTS = ("run", "process", "handle", "dispatch", "execute", "orchestrate", "main")
+
+
+def _semantic_edge_hints(name: str) -> list[str]:
+    lowered = name.lower()
+    hints: list[str] = []
+    if any(token in lowered for token in _VALIDATE_HINTS):
+        hints.append("validates")
+    if any(token in lowered for token in _PERSIST_HINTS):
+        hints.append("persists")
+    if any(token in lowered for token in _ORCHESTRATE_HINTS):
+        hints.append("orchestrates")
+    return hints
+
+
+def _add_semantic_edges(nodes: list[dict], edges: list[dict]) -> None:
+    """Infer lightweight typed semantic edges from code shape and names."""
+    id_to_node = {node.get("id"): node for node in nodes if node.get("id")}
+    qname_to_nid = {
+        node.get("qualified_name", ""): node.get("id", "")
+        for node in nodes
+        if node.get("qualified_name") and node.get("id")
+    }
+    outgoing: dict[str, list[tuple[str, str]]] = {}
+    seen = {
+        (
+            edge.get("source", ""),
+            edge.get("target", ""),
+            edge.get("relation", ""),
+            edge.get("source_file", ""),
+            edge.get("source_location", ""),
+        )
+        for edge in edges
+    }
+
+    for edge in edges:
+        src = edge.get("source")
+        tgt = edge.get("target")
+        if src and tgt:
+            outgoing.setdefault(src, []).append((edge.get("relation", ""), tgt))
+
+    def add_edge(source: str, target: str, relation: str) -> None:
+        src_node = id_to_node.get(source, {})
+        signature = (
+            source,
+            target,
+            relation,
+            src_node.get("source_file", ""),
+            src_node.get("source_location", ""),
+        )
+        if source == target or target not in id_to_node or signature in seen:
+            return
+        seen.add(signature)
+        edges.append({
+            "source": source,
+            "target": target,
+            "relation": relation,
+            "confidence": "INFERRED",
+            "confidence_score": 0.55,
+            "source_file": src_node.get("source_file", ""),
+            "source_location": src_node.get("source_location", ""),
+            "weight": 0.55,
+        })
+
+    for node in nodes:
+        node_id = node.get("id", "")
+        if not node_id or node.get("file_type") != "code":
+            continue
+
+        node.setdefault("semantic_roles", [])
+        roles = list(node["semantic_roles"])
+        for hint in _semantic_edge_hints(node.get("name", "")):
+            if hint not in roles:
+                roles.append(hint)
+
+        direct_targets = [
+            tgt for relation, tgt in outgoing.get(node_id, [])
+            if relation in {"calls", "uses", "imports", "imports_from"}
+        ]
+
+        if len(direct_targets) >= 2 and "orchestrates" not in roles:
+            roles.append("orchestrates")
+
+        container = node.get("container", "")
+        container_nid = qname_to_nid.get(container, "")
+        semantic_targets = direct_targets[:4]
+        if not semantic_targets and container_nid:
+            semantic_targets = [container_nid]
+
+        for role in roles:
+            if role == "orchestrates" and direct_targets:
+                for target in direct_targets[:4]:
+                    add_edge(node_id, target, role)
+            elif semantic_targets:
+                for target in semantic_targets[:2]:
+                    add_edge(node_id, target, role)
+
+        node["semantic_roles"] = roles
+
+
 def _enrich_symbol_metadata(nodes: list[dict], edges: list[dict]) -> None:
     """Populate Phase 1 symbol metadata used by navigation queries."""
     id_to_node = {node.get("id"): node for node in nodes if node.get("id")}
@@ -212,6 +314,8 @@ def _enrich_symbol_metadata(nodes: list[dict], edges: list[dict]) -> None:
         if node.get("description") and not node.get("summary"):
             node["summary"] = node["description"]
 
+    _add_semantic_edges(nodes, edges)
+
     outgoing: dict[str, list[tuple[str, str]]] = {}
     incoming: dict[str, list[tuple[str, str]]] = {}
     for edge in edges:
@@ -232,6 +336,14 @@ def _enrich_symbol_metadata(nodes: list[dict], edges: list[dict]) -> None:
                 break
         return labels
 
+    def _clause(prefix: str, node_ids: list[str], *, limit: int = 3, empty_count: bool = False) -> str | None:
+        labels = _labels(node_ids, limit=limit)
+        if labels:
+            return f"{prefix} {', '.join(labels)}."
+        if empty_count and node_ids:
+            return f"{prefix} {len(node_ids)} symbols."
+        return None
+
     for node in nodes:
         if node.get("summary") or node.get("file_type") != "code":
             continue
@@ -251,45 +363,73 @@ def _enrich_symbol_metadata(nodes: list[dict], edges: list[dict]) -> None:
 
         if symbol_kind == "module":
             children = [tgt for relation, tgt in outs if relation == "contains"]
+            deps = [tgt for relation, tgt in outs if relation in ("imports", "imports_from")]
+            importers = [src for relation, src in ins if relation in ("imports", "imports_from")]
             child_labels = _labels(children)
+            parts = []
             if children:
                 summary = f"Module with {len(children)} top-level symbols"
                 if child_labels:
                     summary += f": {', '.join(child_labels)}"
-                node["summary"] = summary + "."
+                parts.append(summary + ".")
             else:
-                node["summary"] = "Module node."
+                parts.append("Module node.")
+            dep_clause = _clause("Depends on", deps)
+            if dep_clause:
+                parts.append(dep_clause)
+            importer_clause = _clause("Imported by", importers, limit=2)
+            if importer_clause:
+                parts.append(importer_clause)
+            if node.get("semantic_roles"):
+                parts.append(f"Semantic roles: {', '.join(node['semantic_roles'][:3])}.")
+            node["summary"] = " ".join(parts).strip()
             continue
 
         if symbol_kind == "class":
             methods = [tgt for relation, tgt in outs if relation == "method"]
             bases = [tgt for relation, tgt in outs if relation in ("extends", "implements")]
+            callers = [src for relation, src in ins if relation in ("calls", "uses")]
             parts = [f"Class in {container}." if container else "Class."]
-            if methods:
-                parts.append(f"{len(methods)} methods")
-            if bases:
-                base_labels = _labels(bases, limit=2)
-                if base_labels:
-                    parts.append(f"related to {', '.join(base_labels)}")
+            method_clause = _clause("Methods:", methods)
+            if method_clause:
+                parts.append(method_clause)
+            else:
+                parts.append(f"{len(methods)} methods." if methods else "No extracted methods.")
+            base_clause = _clause("Related to", bases, limit=2)
+            if base_clause:
+                parts.append(base_clause)
+            caller_clause = _clause("Used by", callers, limit=2)
+            if caller_clause:
+                parts.append(caller_clause)
+            if node.get("semantic_roles"):
+                parts.append(f"Semantic roles: {', '.join(node['semantic_roles'][:3])}.")
             node["summary"] = " ".join(parts).strip()
             continue
 
         if symbol_kind in ("function", "method"):
             calls = [tgt for relation, tgt in outs if relation == "calls"]
             uses = [tgt for relation, tgt in outs if relation in ("uses", "imports", "imports_from")]
+            callers = [src for relation, src in ins if relation in ("calls", "uses")]
             parts = []
             if container:
                 parts.append(f"{symbol_kind.capitalize()} in {container}.")
             else:
                 parts.append(f"{symbol_kind.capitalize()}.")
+            if node.get("signature"):
+                parts.append(f"Signature: {node['signature']}.")
             if calls:
-                call_labels = _labels(calls)
-                call_text = f"Calls {', '.join(call_labels)}" if call_labels else f"{len(calls)} outgoing calls"
-                parts.append(call_text + ".")
+                call_clause = _clause("Calls", calls)
+                if call_clause:
+                    parts.append(call_clause)
             elif uses:
-                use_labels = _labels(uses)
-                use_text = f"Depends on {', '.join(use_labels)}" if use_labels else f"{len(uses)} dependencies"
-                parts.append(use_text + ".")
+                use_clause = _clause("Depends on", uses)
+                if use_clause:
+                    parts.append(use_clause)
+            caller_clause = _clause("Called by", callers, limit=2)
+            if caller_clause:
+                parts.append(caller_clause)
+            if node.get("semantic_roles"):
+                parts.append(f"Semantic roles: {', '.join(node['semantic_roles'][:3])}.")
             node["summary"] = " ".join(parts).strip()
             continue
 

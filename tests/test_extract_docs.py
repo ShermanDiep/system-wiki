@@ -31,6 +31,42 @@ class ExtractDocsTests(unittest.TestCase):
 
             self.assertEqual(result["nodes"][0]["doc_subtype"], "adr")
 
+    def test_extract_doc_semantic_signals_for_workflow_constraints_and_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "docs" / "checkout-design.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                "\n".join(
+                    [
+                        "# Checkout Design",
+                        "",
+                        "## Workflow",
+                        "1. Validate the request payload.",
+                        "2. Persist the order before emitting events.",
+                        "",
+                        "## Constraints",
+                        "- Requests must include an idempotency key.",
+                        "- Workers should not publish duplicate events.",
+                        "",
+                        "## Decision",
+                        "- We chose the outbox pattern for event delivery.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = extract_doc(path, root=root)
+            hub = result["nodes"][0]
+
+            self.assertEqual(hub["doc_subtype"], "design")
+            self.assertIn("Validate the request payload", hub["workflow_signals"][0])
+            self.assertIn("must include an idempotency key", hub["constraint_signals"][0].lower())
+            self.assertIn("outbox pattern", hub["decision_signals"][0].lower())
+            self.assertIn("Workflow:", hub["summary"])
+            self.assertIn("Constraint:", hub["summary"])
+            self.assertIn("Decision:", hub["summary"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,158 @@
+{
+  "name": "context-engine-starter",
+  "assertions": {
+    "min_avg_context_recall": 0.95,
+    "min_avg_context_precision": 0.6,
+    "max_avg_files_opened": 6.0,
+    "max_avg_approx_tokens": 750.0
+  },
+  "cases": [
+    {
+      "name": "feature-context-query-module-ranking",
+      "command": "context-for",
+      "task": "task-aware path ranking and context assembly in query_graph and module_graph",
+      "mode": "feature",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 0.6,
+        "max_files_opened": 8,
+        "max_approx_tokens": 950
+      },
+      "expected": {
+        "focus_sources": [
+          "system_wiki/query_graph.py",
+          "system_wiki/module_graph.py"
+        ],
+        "file_sources": [
+          "system_wiki/query_graph.py",
+          "system_wiki/module_graph.py"
+        ]
+      }
+    },
+    {
+      "name": "feature-files-for-change-query-module-ranking",
+      "command": "files-for-change",
+      "task": "task-aware path ranking and context assembly in query_graph and module_graph",
+      "mode": "feature",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 1.0,
+        "max_files_opened": 8,
+        "max_approx_tokens": 400
+      },
+      "expected": {
+        "edit_sources": [
+          "system_wiki/query_graph.py",
+          "system_wiki/module_graph.py"
+        ],
+        "verify_sources": [
+          "system_wiki/__main__.py",
+          "system_wiki/eval_benchmarks.py",
+          "system_wiki/export_json.py",
+          "system_wiki/report_markdown.py"
+        ]
+      }
+    },
+    {
+      "name": "refactor-files-for-change-query-graph",
+      "command": "files-for-change",
+      "task": "refactor query_graph context assembly and module ranking",
+      "mode": "refactor",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 1.0,
+        "max_files_opened": 5,
+        "max_approx_tokens": 300
+      },
+      "expected": {
+        "edit_sources": [
+          "system_wiki/query_graph.py"
+        ],
+        "verify_sources": [
+          "system_wiki/__main__.py",
+          "system_wiki/eval_benchmarks.py"
+        ]
+      }
+    },
+    {
+      "name": "docs-for-main-entrypoint",
+      "command": "docs-for",
+      "label": "main",
+      "mode": "onboarding",
+      "doc_type": "readme",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 0.5,
+        "max_files_opened": 6,
+        "max_approx_tokens": 320
+      },
+      "expected": {
+        "doc_sources": [
+          "README.md"
+        ]
+      }
+    },
+    {
+      "name": "doc-drift-main-entrypoint",
+      "command": "doc-drift",
+      "label": "main",
+      "mode": "onboarding",
+      "doc_type": "readme",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 0.5,
+        "max_files_opened": 6,
+        "max_approx_tokens": 650
+      },
+      "expected": {
+        "review_doc_sources": [
+          "README.md"
+        ]
+      }
+    },
+    {
+      "name": "untested-impact-query-graph",
+      "command": "untested-impact",
+      "label": "query_graph.py",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 1.0,
+        "max_files_opened": 2,
+        "max_approx_tokens": 180
+      },
+      "expected": {
+        "untested_sources": [
+          "system_wiki/__main__.py"
+        ]
+      }
+    },
+    {
+      "name": "verify-after-change-query-module-feature",
+      "command": "verify-after-change",
+      "task": "task-aware path ranking and context assembly in query_graph and module_graph",
+      "mode": "feature",
+      "assertions": {
+        "min_case_recall": 1.0,
+        "min_case_precision": 0.7,
+        "max_files_opened": 7,
+        "max_approx_tokens": 650
+      },
+      "expected": {
+        "verify_sources": [
+          "system_wiki/__main__.py",
+          "system_wiki/eval_benchmarks.py",
+          "system_wiki/export_json.py",
+          "system_wiki/report_markdown.py"
+        ],
+        "smoke_sources": [
+          "system_wiki/query_graph.py"
+        ],
+        "watch_sources": [
+          "system_wiki/__main__.py",
+          "system_wiki/export_json.py",
+          "system_wiki/report_markdown.py"
+        ]
+      }
+    }
+  ]
+}
