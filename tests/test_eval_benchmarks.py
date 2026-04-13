@@ -66,6 +66,19 @@ class EvalBenchmarkTests(unittest.TestCase):
                     },
                 },
                 {
+                    "name": "doc drift feature",
+                    "command": "doc-drift",
+                    "label": "main",
+                    "mode": "onboarding",
+                    "doc_type": "readme",
+                    "assertions": {
+                        "min_case_recall": 1.0,
+                    },
+                    "expected": {
+                        "review_doc_sources": ["README.md"],
+                    },
+                },
+                {
                     "name": "untested impact",
                     "command": "untested-impact",
                     "label": "handle_request",
@@ -96,7 +109,7 @@ class EvalBenchmarkTests(unittest.TestCase):
 
         report = evaluate_suite(graph, suite)
 
-        self.assertEqual(report["summary"]["case_count"], 5)
+        self.assertEqual(report["summary"]["case_count"], 6)
         self.assertGreater(report["summary"]["avg_context_recall"], 0.9)
         self.assertGreater(report["summary"]["avg_context_precision"], 0.4)
         self.assertTrue(report["passed"])
@@ -104,8 +117,9 @@ class EvalBenchmarkTests(unittest.TestCase):
         self.assertEqual(report["cases"][0]["metrics"]["edit_sources"]["matched"], ["app/service.py"])
         self.assertEqual(report["cases"][0]["metrics"]["verify_sources"]["matched"], ["app/main.py"])
         self.assertEqual(report["cases"][2]["metrics"]["doc_sources"]["matched"], ["docs/runbook-service.md"])
-        self.assertEqual(report["cases"][3]["metrics"]["untested_sources"]["matched"], ["app/main.py"])
-        self.assertEqual(report["cases"][4]["metrics"]["smoke_sources"]["matched"], ["app/main.py"])
+        self.assertEqual(report["cases"][3]["metrics"]["review_doc_sources"]["matched"], ["README.md"])
+        self.assertEqual(report["cases"][4]["metrics"]["untested_sources"]["matched"], ["app/main.py"])
+        self.assertEqual(report["cases"][5]["metrics"]["smoke_sources"]["matched"], ["app/main.py"])
 
     def test_evaluate_suite_reports_failed_assertions(self) -> None:
         graph = _build_graph()
@@ -181,12 +195,10 @@ class EvalBenchmarkTests(unittest.TestCase):
             "cases": [
                 {
                     "name": "docs lookup",
-                    "command": "docs-for",
+                    "command": "doc-drift",
                     "label": "handle_request",
-                    "mode": "bugfix",
-                    "doc_type": "runbook",
                     "expected": {
-                        "doc_sources": ["docs/runbook-service.md"],
+                        "review_doc_sources": ["docs/runbook-service.md"],
                     },
                 }
             ],

@@ -9,6 +9,7 @@ import networkx as nx
 
 from system_wiki.query_graph import (
     _build_context_bundle,
+    _doc_drift_plan,
     _doc_rows_for_target,
     _files_for_change_plan,
     _load_graph,
@@ -16,6 +17,7 @@ from system_wiki.query_graph import (
     _untested_impact_file_rows,
     _verify_after_change_plan,
     cmd_context_for,
+    cmd_doc_drift,
     cmd_docs_for,
     cmd_files_for_change,
     cmd_untested_impact,
@@ -158,6 +160,35 @@ def _docs_case_result(G: nx.Graph, case: dict) -> dict:
     }
 
 
+def _doc_drift_case_result(G: nx.Graph, case: dict) -> dict:
+    label = case.get("label", "")
+    mode = case.get("mode")
+    doc_type = case.get("doc_type")
+    depth = int(case.get("max_depth", 3))
+    plan = _doc_drift_plan(G, label, mode=mode, max_depth=depth, doc_type=doc_type)
+    rendered = cmd_doc_drift(G, label, mode=mode, max_depth=depth, doc_type=doc_type)
+    actual = {
+        "stale_doc_sources": [source for source, _, _, _ in (plan["stale_docs"] if plan else [])],
+        "missing_doc_sources": [source for source, _, _, _ in (plan["missing_docs"] if plan else [])],
+        "weak_link_doc_sources": [source for source, _, _, _ in (plan["weak_links"] if plan else [])],
+        "review_doc_sources": [source for source, _, _, _ in (plan["review_docs"] if plan else [])],
+    }
+    all_sources = (
+        actual["stale_doc_sources"]
+        + actual["missing_doc_sources"]
+        + actual["weak_link_doc_sources"]
+        + actual["review_doc_sources"]
+    )
+    return {
+        "command": "doc-drift",
+        "rendered": rendered,
+        "approx_tokens": _approx_tokens(rendered),
+        "files_opened": len(set(all_sources)),
+        "impact_risk": plan["risk"] if plan else None,
+        "actual": actual,
+    }
+
+
 def _files_case_result(G: nx.Graph, case: dict) -> dict:
     task = case.get("task", "")
     mode = case.get("mode")
@@ -249,6 +280,8 @@ def evaluate_suite(G: nx.Graph, suite: dict) -> dict:
             result = _context_case_result(G, case)
         elif command == "docs-for":
             result = _docs_case_result(G, case)
+        elif command == "doc-drift":
+            result = _doc_drift_case_result(G, case)
         elif command == "files-for-change":
             result = _files_case_result(G, case)
         elif command == "untested-impact":

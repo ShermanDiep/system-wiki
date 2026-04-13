@@ -21,10 +21,11 @@ Usage:
 
 Query commands:
   search <terms>   definitions <term> references <label>
+  hierarchy <label>
   node <label>     explain <label>    neighbors <label>
   callers <label>  callees <label>    imported-by <label>
-  tests-for <label> docs-for <label>   impact <label>
-  untested-impact <x>                  files-for-change <task>
+  tests-for <label> docs-for <label>   doc-drift <label>
+  impact <label>    untested-impact <x> files-for-change <task>
   verify-after-change <task>           file <path>
   symbols <path>   modules [term]      module <path>
   module-deps <p>  module-dependents <p> module-path <A> <B>

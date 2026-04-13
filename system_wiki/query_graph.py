@@ -139,6 +139,37 @@ _DOC_SUBTYPE_MODE_WEIGHTS: dict[str, dict[str, float]] = {
     },
 }
 
+_DOC_EXPECTATIONS: dict[str, dict[str, tuple[str, ...]]] = {
+    "bugfix": {
+        "preferred": ("runbook", "incident"),
+        "fallback": ("readme",),
+    },
+    "feature": {
+        "preferred": ("spec", "design", "api_contract"),
+        "fallback": ("adr",),
+    },
+    "refactor": {
+        "preferred": ("design", "adr"),
+        "fallback": ("readme",),
+    },
+    "onboarding": {
+        "preferred": ("readme", "domain"),
+        "fallback": ("design",),
+    },
+}
+
+_DOC_STRICTNESS: dict[str, float] = {
+    "spec": 3.0,
+    "design": 3.0,
+    "adr": 2.5,
+    "api_contract": 3.0,
+    "runbook": 2.0,
+    "incident": 2.0,
+    "readme": 1.0,
+    "domain": 1.0,
+    "general": 1.0,
+}
+
 
 def _load_graph(graph_path: str) -> nx.Graph:
     """Load graph from JSON file, returning a NetworkX graph."""
@@ -410,6 +441,88 @@ def _select_node_match(G: nx.Graph, term: str) -> str | None:
     return next((nid for nid in matches if G.nodes[nid].get("symbol_kind") != "module"), matches[0])
 
 
+def _is_definition_node(data: dict) -> bool:
+    return data.get("file_type") == "code" and _node_kind(data) in {"module", "class", "function", "method"}
+
+
+def _definition_score(G: nx.Graph, nid: str, term: str) -> float:
+    data = G.nodes[nid]
+    if not _is_definition_node(data):
+        return 0.0
+
+    t = term.lower().strip()
+    if not t:
+        return 0.0
+
+    label = data.get("label", "").lower()
+    name = data.get("name", "").lower()
+    qname = data.get("qualified_name", "").lower()
+    container = data.get("container", "").lower()
+    source = data.get("source_file", "").lower()
+    basename = Path(source).name.lower() if source else ""
+    stem = Path(source).stem.lower() if source else ""
+
+    score = 0.0
+    if nid.lower() == t or qname == t or source == t:
+        score += 200.0
+    if label == t or name == t or basename == t:
+        score += 140.0
+    if stem == t and data.get("symbol_kind") == "module":
+        score += 130.0
+    if qname.endswith(f".{t}") or container.endswith(f".{t}"):
+        score += 90.0
+    if t in qname:
+        score += 30.0
+    if t in name or t in label:
+        score += 24.0
+    if t in source:
+        score += 12.0
+    if data.get("symbol_kind") != "module":
+        score += 5.0
+    return score
+
+
+def _definition_matches(G: nx.Graph, term: str, limit: int = 15) -> list[str]:
+    ranked: list[tuple[float, str]] = []
+    for nid in G.nodes:
+        score = _definition_score(G, nid, term)
+        if score > 0:
+            ranked.append((score, nid))
+    ranked.sort(key=lambda item: (-item[0], _node_source(G, item[1]), item[1]))
+    return [nid for _, nid in ranked[:limit]]
+
+
+def _definition_identity_text(G: nx.Graph, nid: str) -> str:
+    data = G.nodes[nid]
+    qname = data.get("qualified_name")
+    if qname:
+        return qname
+    source = data.get("source_file")
+    if source:
+        return source
+    return _node_title(G, nid)
+
+
+def _reference_target_matches(G: nx.Graph, term: str, limit: int = 5) -> list[str]:
+    matches = _definition_matches(G, term, limit=limit)
+    if not matches:
+        return []
+
+    t = term.lower().strip()
+    exact = []
+    for nid in matches:
+        data = G.nodes[nid]
+        if t in {
+            nid.lower(),
+            data.get("qualified_name", "").lower(),
+            data.get("source_file", "").lower(),
+            data.get("name", "").lower(),
+            data.get("label", "").lower(),
+        }:
+            exact.append(nid)
+    return exact or matches
+
+
 def _parse_depth_arg(args: list[str], default: int = 3) -> tuple[int, list[str]]:
     if len(args) >= 2 and args[0] == "--depth":
         try:
@@ -505,9 +618,27 @@ def _doc_subtype_label(data: dict) -> str:
     return _doc_subtype(data).replace("_", " ")
 
 
+def _is_readme_like_doc(data: dict) -> bool:
+    source = data.get("source_file", "")
+    if source and Path(source).name.lower().startswith("readme"):
+        return True
+    label = data.get("label", "").strip().lower()
+    return label == "readme"
+
+
 def _doc_mode_weight(mode: str, subtype: str) -> float:
     table = _DOC_SUBTYPE_MODE_WEIGHTS.get(mode, {})
     return table.get(subtype, table.get("general", 1.0))
+
+
+def _doc_expectations(mode: str, doc_type: str | None = None) -> dict[str, tuple[str, ...]]:
+    if doc_type:
+        return {"preferred": (doc_type,), "fallback": ()}
+    return _DOC_EXPECTATIONS.get(mode, {"preferred": ("readme",), "fallback": ()})
+
+
+def _doc_strictness(subtype: str) -> float:
+    return _DOC_STRICTNESS.get(subtype, _DOC_STRICTNESS["general"])
 
 
 def _is_module_node(data: dict) -> bool:
@@ -945,6 +1076,8 @@ def _context_file_rows(
         source = G.nodes[nid].get("source_file", "")
         if not source:
             continue
+        if _is_test_source(source):
+            continue
         file_scores[source] = file_scores.get(source, 0.0) + score
         seen_reasons = file_reasons.setdefault(source, [])
         for reason in reasons:
@@ -985,6 +1118,8 @@ def _doc_rows_for_target(
         subtype = _doc_subtype(doc_data)
         if requested_type and subtype != requested_type:
             return
+        if requested_type == "readme" and not _is_readme_like_doc(doc_data):
+            return
         score *= _doc_mode_weight(resolved_mode, subtype)
         doc_scores[doc_nid] = doc_scores.get(doc_nid, 0.0) + score
         reasons = doc_reasons.setdefault(doc_nid, [])
@@ -1017,7 +1152,7 @@ def _doc_rows_for_target(
         for doc_nid, doc_data in G.nodes(data=True):
             if not _is_doc_node(doc_data):
                 continue
-            if _doc_subtype(doc_data) != "readme":
+            if _doc_subtype(doc_data) != "readme" or not _is_readme_like_doc(doc_data):
                 continue
             if _looks_like_entrypoint(data) or data.get("symbol_kind") == "module":
                 add_doc(doc_nid, 3.5, "readme overview for entrypoint/module")
@@ -1103,6 +1238,273 @@ def _aggregate_file_rows(
     ]
     grouped.sort(key=lambda item: (-item[1], item[0]))
     return grouped[:max_files]
+
+
+def _merge_file_rows(
+    rows: list[tuple[str, float, list[str], list[str]]],
+    max_files: int = 4,
+) -> list[tuple[str, float, list[str], list[str]]]:
+    scores: dict[str, float] = {}
+    reasons_by_source: dict[str, list[str]] = {}
+    nodes_by_source: dict[str, list[str]] = {}
+
+    for source, score, reasons, nodes in rows:
+        if not source:
+            continue
+        scores[source] = scores.get(source, 0.0) + score
+        reason_list = reasons_by_source.setdefault(source, [])
+        for reason in reasons:
+            if reason not in reason_list:
+                reason_list.append(reason)
+        node_list = nodes_by_source.setdefault(source, [])
+        for node in nodes:
+            if node not in node_list:
+                node_list.append(node)
+
+    merged = [
+        (source, scores[source], reasons_by_source.get(source, []), nodes_by_source.get(source, []))
+        for source in scores
+    ]
+    merged.sort(key=lambda item: (-item[1], item[0]))
+    return merged[:max_files]
+
+
+def _doc_reference_sets(G: nx.Graph, nid: str) -> tuple[set[str], set[str]]:
+    target_docs = {doc_nid for doc_nid, _ in _incoming_edges(G, nid, {"mentions", "references"}) if _is_doc_node(G.nodes[doc_nid])}
+    module_docs: set[str] = set()
+    source = G.nodes[nid].get("source_file", "")
+    module_nid = _module_source_map(G).get(source) if source else None
+    if module_nid:
+        module_docs = {
+            doc_nid for doc_nid, _ in _incoming_edges(G, module_nid, {"mentions", "references"})
+            if _is_doc_node(G.nodes[doc_nid])
+        }
+    return target_docs, module_docs
+
+
+def _drift_important_code_rows(
+    G: nx.Graph,
+    nid: str,
+    mode: str,
+    max_depth: int = 3,
+) -> list[tuple[str, float, list[str]]]:
+    rows: dict[str, tuple[float, list[str]]] = {}
+    M = _build_module_graph(G)
+    source = G.nodes[nid].get("source_file", "")
+    module_nid = _module_source_map(G).get(source) if source else None
+
+    def add_row(node_id: str, score: float, reason: str) -> None:
+        if node_id not in G.nodes:
+            return
+        data = G.nodes[node_id]
+        if not _is_code_symbol(data):
+            return
+        if _is_test_source(data.get("source_file", "")):
+            return
+        prev_score, prev_reasons = rows.get(node_id, (0.0, []))
+        next_reasons = list(prev_reasons)
+        if reason not in next_reasons:
+            next_reasons.append(reason)
+        rows[node_id] = (prev_score + score, next_reasons)
+
+    add_row(nid, 8.0, "drift target")
+    if module_nid and module_nid != nid:
+        add_row(module_nid, 5.0, "target module")
+
+    for src, _ in _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+        add_row(src, 4.5, f"direct dependent on {_node_title(G, nid)}")
+    for tgt, _ in _outgoing_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+        add_row(tgt, 3.0, f"dependency of {_node_title(G, nid)}")
+
+    transitive = _transitive_incoming(
+        G,
+        nid,
+        {"calls", "imports", "imports_from", "uses", "extends", "implements"},
+        max_depth=max_depth,
+    )
+    for src, depth in transitive.items():
+        add_row(src, 2.5 / depth, f"{depth}-hop dependent on {_node_title(G, nid)}")
+
+    if module_nid and module_nid in M:
+        for other in M.predecessors(module_nid):
+            add_row(other, 2.5, f"module depends on {source}")
+        for other in M.successors(module_nid):
+            add_row(other, 2.0, f"module dependency of {source}")
+
+    target_module_nid = module_nid if module_nid and module_nid in M else None
+    for row in _entrypoint_rows_for_target(G, nid, target_module_nid, max_depth=max_depth)[:4]:
+        add_row(
+            row["entry_nid"],
+            3.5 / max(row["hop_count"], 1),
+            f"entry path reaches {_node_title(G, nid)}",
+        )
+
+    result = [(node_id, score, reasons) for node_id, (score, reasons) in rows.items()]
+    result.sort(key=lambda item: (-item[1], _node_source(G, item[0]), item[0]))
+    return result[:8]
+
+
+def _doc_drift_plan(
+    G: nx.Graph,
+    label: str,
+    mode: str | None = None,
+    max_depth: int = 3,
+    doc_type: str | None = None,
+) -> dict | None:
+    nid = _select_node_match(G, label)
+    if not nid:
+        return None
+
+    resolved_mode = mode or _infer_context_mode(label)
+    expectations = _doc_expectations(resolved_mode, doc_type=doc_type)
+    review_rows = _doc_rows_for_target(G, nid, max_docs=8, mode=resolved_mode, doc_type=doc_type)
+    target_docs, module_docs = _doc_reference_sets(G, nid)
+    important_nodes = _drift_important_code_rows(G, nid, resolved_mode, max_depth=max_depth)
+
+    stale_rows: list[tuple[str, float, list[str]]] = []
+    weak_rows: list[tuple[str, float, list[str]]] = []
+    seen_stale: set[str] = set()
+    seen_weak: set[str] = set()
+
+    target_title = _node_title(G, nid)
+    source = G.nodes[nid].get("source_file", "")
+    module_nid = _module_source_map(G).get(source) if source else None
+    has_high_importance_neighbor = any(score >= 4.0 and other != nid for other, score, _ in important_nodes)
+
+    for doc_nid, score, reasons in review_rows:
+        doc_data = G.nodes[doc_nid]
+        subtype = _doc_subtype(doc_data)
+        reason_set = set(reasons)
+        direct_target = doc_nid in target_docs
+        direct_module = doc_nid in module_docs
+        linkage_reasons = [
+            reason for reason in reasons
+            if not reason.endswith(" doc")
+        ]
+        low_strength = all(
+            any(token in reason for token in ("same community", "readme overview", "lexical match"))
+            for reason in linkage_reasons
+        ) if linkage_reasons else False
+
+        stale_reasons: list[str] = []
+        weak_reasons: list[str] = []
+        stale_score = 0.0
+        weak_score = 0.0
+
+        if direct_module and not direct_target and has_high_importance_neighbor and subtype in {"spec", "design", "adr", "api_contract"}:
+            stale_score += 3.0 + _doc_strictness(subtype)
+            stale_reasons.append(f"only linked at module level for {target_title}")
+            stale_reasons.append("high-importance function/class neighbors dominate this area")
+
+        if not direct_target and not direct_module and low_strength:
+            weak_score += 2.0 + _doc_strictness(subtype) * 0.5
+            weak_reasons.append("only low-strength doc-code linkage found")
+            if "readme overview for entrypoint/module" in reason_set:
+                weak_reasons.append("coverage relies on readme fallback")
+            if any("same community" in reason for reason in reasons):
+                weak_reasons.append("coverage relies on same-community proximity")
+            if any("lexical match" in reason for reason in reasons):
+                weak_reasons.append("coverage relies on lexical match only")
+
+        if (
+            subtype in expectations["preferred"]
+            and subtype not in {"readme", "domain", "general"}
+            and not direct_target
+            and has_high_importance_neighbor
+        ):
+            stale_score += 2.0 + _doc_strictness(subtype)
+            stale_reasons.append(f"{subtype.replace('_', ' ')} doc is weakly linked for a high-signal code area")
+
+        if stale_reasons and doc_nid not in seen_stale:
+            seen_stale.add(doc_nid)
+            stale_rows.append((doc_nid, score + stale_score, stale_reasons + reasons[:2]))
+        elif weak_reasons and doc_nid not in seen_weak:
+            seen_weak.add(doc_nid)
+            weak_rows.append((doc_nid, score + weak_score, weak_reasons + reasons[:2]))
+
+    preferred = set(expectations["preferred"])
+    fallback = set(expectations["fallback"])
+    missing_rows: list[tuple[str, float, list[str]]] = []
+
+    for code_nid, importance, reasons in important_nodes:
+        code_source = G.nodes[code_nid].get("source_file", "")
+        if not code_source:
+            continue
+        code_docs = _doc_rows_for_target(G, code_nid, max_docs=8, mode=resolved_mode, doc_type=doc_type)
+        doc_subtypes = {_doc_subtype(G.nodes[doc_nid]) for doc_nid, _, _ in code_docs}
+        direct_docs, direct_module_docs = _doc_reference_sets(G, code_nid)
+        strong_docs = direct_docs | direct_module_docs
+        has_preferred = bool(doc_subtypes & preferred) if preferred else bool(code_docs)
+        has_fallback = bool(doc_subtypes & fallback)
+
+        if preferred and not has_preferred:
+            missing_reasons = [f"missing preferred docs for {resolved_mode} work"]
+            missing_reasons.append(f"expected: {', '.join(t.replace('_', ' ') for t in expectations['preferred'])}")
+            if has_fallback:
+                missing_reasons.append("only fallback/overview docs found")
+            elif strong_docs:
+                missing_reasons.append("linked docs exist but not in expected subtype")
+            else:
+                missing_reasons.append("no strong doc-code links found")
+            missing_rows.append((code_nid, importance + 4.0, missing_reasons + reasons[:2]))
+        elif not strong_docs and code_docs:
+            missing_rows.append((
+                code_nid,
+                importance + 2.5,
+                ["docs exist but none are directly linked to this code area"] + reasons[:2],
+            ))
+
+    stale_files = _aggregate_file_rows(G, stale_rows, max_files=4)
+    missing_files = _aggregate_file_rows(G, missing_rows, max_files=4)
+    weak_files = _aggregate_file_rows(G, weak_rows, max_files=4)
+    review_files = _aggregate_file_rows(G, review_rows, max_files=4)
+
+    impact_risk = "low"
+    if (stale_files and missing_files) or len(missing_files) >= 2:
+        impact_risk = "high"
+    elif stale_files or missing_files or len(weak_files) >= 2:
+        impact_risk = "medium"
+
+    return {
+        "label": label,
+        "target": nid,
+        "mode": resolved_mode,
+        "doc_type": doc_type,
+        "risk": impact_risk,
+        "expectations": expectations,
+        "important_nodes": important_nodes,
+        "stale_docs": stale_files,
+        "missing_docs": missing_files,
+        "weak_links": weak_files,
+        "review_docs": review_files,
+    }
+
+
+def _doc_drift_watch_from_focus(
+    G: nx.Graph,
+    focus_rows: list[tuple[str, float, list[str]]],
+    mode: str,
+    max_depth: int = 3,
+) -> dict[str, list[tuple[str, float, list[str], list[str]]]]:
+    stale_rows: list[tuple[str, float, list[str], list[str]]] = []
+    missing_rows: list[tuple[str, float, list[str], list[str]]] = []
+    weak_rows: list[tuple[str, float, list[str], list[str]]] = []
+
+    for nid, _, _ in focus_rows[:4]:
+        data = G.nodes[nid]
+        label = data.get("qualified_name") or data.get("source_file") or _node_title(G, nid)
+        plan = _doc_drift_plan(G, label, mode=mode, max_depth=max_depth)
+        if not plan:
+            continue
+        stale_rows.extend(plan["stale_docs"])
+        missing_rows.extend(plan["missing_docs"])
+        weak_rows.extend(plan["weak_links"])
+
+    return {
+        "stale": _merge_file_rows(stale_rows, max_files=4),
+        "missing": _merge_file_rows(missing_rows, max_files=4),
+        "weak": _merge_file_rows(weak_rows, max_files=4),
+    }
 
 
 def _untested_impact_file_rows(
@@ -1509,6 +1911,54 @@ def cmd_docs_for(G: nx.Graph, label: str, mode: str | None = None, doc_type: str
     return "\n".join(lines)
 
 
+def cmd_doc_drift(
+    G: nx.Graph,
+    label: str,
+    mode: str | None = None,
+    max_depth: int = 3,
+    doc_type: str | None = None,
+) -> str:
+    """Report likely drift between docs and code for a symbol/module."""
+    plan = _doc_drift_plan(G, label, mode=mode, max_depth=max_depth, doc_type=doc_type)
+    if not plan:
+        return f"No symbol or module matching '{label}'."
+
+    target_nid = plan["target"]
+    title = f"Doc drift for {_node_title(G, target_nid)} [{plan['mode']}]"
+    if plan["doc_type"]:
+        title += f" [type={plan['doc_type']}]"
+    lines = [title + ":"]
+    lines.append(
+        f"  risk: {plan['risk']} "
+        f"(stale={len(plan['stale_docs'])} missing={len(plan['missing_docs'])} "
+        f"weak={len(plan['weak_links'])} review={len(plan['review_docs'])})"
+    )
+    if plan["important_nodes"]:
+        lines.append("Important code in scope:")
+        for nid, score, reasons in plan["important_nodes"][:4]:
+            lines.append(f"  - {_node_title(G, nid)}  [{_node_source(G, nid)}]  score={score:.1f}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:2])}")
+
+    def add_bucket(header: str, rows: list[tuple[str, float, list[str], list[str]]], none_text: str) -> None:
+        lines.append(header)
+        if not rows:
+            lines.append(f"  - {none_text}")
+            return
+        for source, score, reasons, symbols in rows:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
+    add_bucket("Likely stale docs:", plan["stale_docs"], "No likely stale docs.")
+    add_bucket("Missing docs for important code:", plan["missing_docs"], "No obvious missing-doc gaps.")
+    add_bucket("Weak doc-code links:", plan["weak_links"], "No weak doc-code links.")
+    add_bucket("Suggested docs to review:", plan["review_docs"], "No docs to review.")
+    return "\n".join(lines)
+
+
 def _files_for_change_plan(
     G: nx.Graph,
     task: str,
@@ -1579,10 +2029,13 @@ def _verify_after_change_plan(
             continue
         untested_watch.append((source, score, reasons, symbols))
 
+    drift_watch = _doc_drift_watch_from_focus(G, bundle["focus_symbols"], bundle["mode"], max_depth=max_depth)
+
     return {
         "plan": plan,
         "smoke_paths": smoke_paths[:4],
         "untested_watch": untested_watch[:4],
+        "doc_drift_watch": drift_watch,
     }
 
 
@@ -1711,6 +2164,33 @@ def cmd_verify_after_change(G: nx.Graph, task: str, mode: str | None = None, max
             if reasons:
                 lines.append(f"    why: {', '.join(reasons[:3])}")
 
+    if verify_plan["doc_drift_watch"]["stale"]:
+        lines.append("Likely stale docs after change:")
+        for source, score, reasons, symbols in verify_plan["doc_drift_watch"]["stale"][:4]:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
+    if verify_plan["doc_drift_watch"]["missing"]:
+        lines.append("Missing docs to create/update:")
+        for source, score, reasons, symbols in verify_plan["doc_drift_watch"]["missing"][:4]:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
+    if verify_plan["doc_drift_watch"]["weak"]:
+        lines.append("Weak doc coverage watchlist:")
+        for source, score, reasons, symbols in verify_plan["doc_drift_watch"]["weak"][:4]:
+            lines.append(f"  - {source}  score={score:.1f}")
+            if symbols:
+                lines.append(f"    nodes: {', '.join(symbols[:3])}")
+            if reasons:
+                lines.append(f"    why: {', '.join(reasons[:3])}")
+
     if verify_plan["untested_watch"]:
         lines.append("Untested impact watchlist:")
         for source, score, reasons, symbols in verify_plan["untested_watch"][:4]:
@@ -1756,7 +2236,7 @@ def cmd_node(G: nx.Graph, label: str) -> str:
 
 def cmd_definitions(G: nx.Graph, term: str) -> str:
     """List matching symbols with source locations."""
-    matches = _find_nodes(G, term)
+    matches = _definition_matches(G, term)
     if not matches:
         return f"No symbol matching '{term}'."
     lines = [f"Definitions for '{term}':"]
@@ -1772,16 +2252,34 @@ def cmd_definitions(G: nx.Graph, term: str) -> str:
 
 def cmd_references(G: nx.Graph, label: str) -> str:
     """Show incoming references/dependencies to a node."""
-    matches = _find_nodes(G, label)
+    matches = _reference_target_matches(G, label)
     if not matches:
         return f"No node matching '{label}'."
+    if len(matches) > 1:
+        lines = [f"Ambiguous symbol '{label}'. Matches:"]
+        for nid in matches[:5]:
+            data = G.nodes[nid]
+            lines.append(
+                f"  - {_node_title(G, nid)}  [{data.get('symbol_kind', data.get('file_type', ''))}]  [{_node_source(G, nid)}]"
+            )
+            identity = _definition_identity_text(G, nid)
+            if identity:
+                lines.append(f"    {_definition_identity_text(G, nid)}")
+        lines.append("Use a qualified name or source path to disambiguate.")
+        return "\n".join(lines)
+
     nid = matches[0]
     incoming = _incoming_edges(G, nid)
     if not incoming:
         return f"No incoming references to {_node_title(G, nid)}."
     lines = [f"References to {_node_title(G, nid)}:"]
     for src, data in sorted(incoming, key=lambda item: (_node_title(G, item[0]).lower(), item[1].get("relation", ""))):
-        lines.append(f"  <- {_node_title(G, src)}  [{data.get('relation', '')}] [{data.get('confidence', '')}]")
+        lines.append(
+            f"  <- {_node_title(G, src)}  [{data.get('relation', '')}] [{data.get('confidence', '')}]  [{_node_source(G, src)}]"
+        )
+        identity = _definition_identity_text(G, src)
+        if identity:
+            lines.append(f"    {identity}")
     return "\n".join(lines)
 
 
@@ -1892,6 +2390,93 @@ def cmd_symbols(G: nx.Graph, path_term: str) -> str:
     lines = [f"Symbols in {source}:"]
     for nid, data in symbols:
         lines.append(f"  - {data.get('label', nid)}  [{data.get('symbol_kind', data.get('file_type', ''))}]  {data.get('source_location', '')}")
+    return "\n".join(lines)
+
+
+def _hierarchy_parent_map(G: nx.Graph) -> dict[str, str]:
+    parent_map: dict[str, str] = {}
+    for _, _, data in G.edges(data=True):
+        src = data.get("_src")
+        tgt = data.get("_tgt")
+        relation = data.get("relation")
+        if relation in {"contains", "method"} and src and tgt and tgt not in parent_map:
+            parent_map[tgt] = src
+    return parent_map
+
+
+def _hierarchy_children(G: nx.Graph, nid: str) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for child, data in _outgoing_edges(G, nid, {"contains", "method"}):
+        rows.append((data.get("relation", ""), G.nodes[child].get("source_location", ""), child))
+    rows.sort(key=lambda item: (item[1], item[2]))
+    return [(relation, child) for relation, _, child in rows]
+
+
+def _hierarchy_siblings(G: nx.Graph, nid: str, parent_map: dict[str, str]) -> list[tuple[str, str]]:
+    parent_nid = parent_map.get(nid)
+    if not parent_nid:
+        return []
+    return [(relation, child) for relation, child in _hierarchy_children(G, parent_nid) if child != nid]
+
+
+def cmd_hierarchy(G: nx.Graph, label: str) -> str:
+    """Show parent/child hierarchy for a module/class/function/method."""
+    nid = _select_node_match(G, label)
+    if not nid:
+        return f"No symbol or module matching '{label}'."
+
+    data = G.nodes[nid]
+    parent_map = _hierarchy_parent_map(G)
+    chain = [nid]
+    seen = {nid}
+    cur = nid
+    while cur in parent_map and parent_map[cur] not in seen:
+        cur = parent_map[cur]
+        chain.append(cur)
+        seen.add(cur)
+    chain.reverse()
+
+    lines = [f"Hierarchy for {_node_title(G, nid)}:"]
+    qname = data.get("qualified_name", "")
+    if qname:
+        lines.append(f"  qname: {qname}")
+    if data.get("source_file"):
+        lines.append(f"  source: {_node_source(G, nid)}")
+
+    package_parts = qname.split(".")[:-1] if qname and data.get("symbol_kind") == "module" else []
+    if package_parts:
+        lines.append(f"  package: {' > '.join(package_parts)}")
+
+    lines.append("Ancestors:")
+    for depth, ancestor in enumerate(chain, start=1):
+        ancestor_data = G.nodes[ancestor]
+        lines.append(
+            f"  {depth}. {_node_title(G, ancestor)}  [{ancestor_data.get('symbol_kind', ancestor_data.get('file_type', ''))}]  [{_node_source(G, ancestor)}]"
+        )
+
+    children = _hierarchy_children(G, nid)
+    lines.append("Children:")
+    if not children:
+        lines.append("  - None")
+    else:
+        for relation, child in children:
+            child_data = G.nodes[child]
+            rel_text = "method" if relation == "method" else "contains"
+            lines.append(
+                f"  - {_node_title(G, child)}  [{child_data.get('symbol_kind', child_data.get('file_type', ''))}]  "
+                f"[{_node_source(G, child)}]  via {rel_text}"
+            )
+
+    siblings = _hierarchy_siblings(G, nid, parent_map)
+    if siblings:
+        lines.append("Siblings:")
+        for relation, sibling in siblings:
+            sibling_data = G.nodes[sibling]
+            rel_text = "method" if relation == "method" else "contains"
+            lines.append(
+                f"  - {_node_title(G, sibling)}  [{sibling_data.get('symbol_kind', sibling_data.get('file_type', ''))}]  "
+                f"[{_node_source(G, sibling)}]  via {rel_text}"
+            )
     return "\n".join(lines)
 
 
@@ -2289,6 +2874,7 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
     transitive_only = {src: depth for src, depth in transitive.items() if src not in direct_sources}
     impacted_nodes = {src for src, _ in callers + importers + subclasses + implementers + doc_mentions}
     untested_rows = _untested_impact_file_rows(G, nid, max_depth=3)
+    drift_plan = _doc_drift_plan(G, G.nodes[nid].get("qualified_name") or G.nodes[nid].get("source_file") or _node_title(G, nid))
     community = G.nodes[nid].get("community")
     bridge_count = sum(1 for other in set(impacted_nodes) | set(transitive_only) if G.nodes[other].get("community") != community)
     doc_type_counts: dict[str, int] = {}
@@ -2320,6 +2906,9 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
         f"  docs/spec mentions: {len(doc_mentions)}",
         f"  related tests: {len(tests)}",
         f"  untested impacted files: {len(untested_rows)}",
+        f"  doc drift: stale={len(drift_plan['stale_docs']) if drift_plan else 0} "
+        f"missing={len(drift_plan['missing_docs']) if drift_plan else 0} "
+        f"weak={len(drift_plan['weak_links']) if drift_plan else 0}",
         f"  cross-community touches: {bridge_count}",
     ]
     if callers:
@@ -2352,6 +2941,18 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
         lines.append("  transitive dependents:")
         for src, depth in sorted(transitive_only.items(), key=lambda item: (item[1], _node_title(G, item[0]).lower()))[:8]:
             lines.append(f"    - {_node_title(G, src)}  [{depth}-hop]")
+    if drift_plan and drift_plan["stale_docs"]:
+        lines.append("  likely stale docs:")
+        for source, score, reasons, symbols in drift_plan["stale_docs"][:4]:
+            lines.append(f"    - {source}  score={score:.1f}")
+            if reasons:
+                lines.append(f"      why: {', '.join(reasons[:2])}")
+    if drift_plan and drift_plan["missing_docs"]:
+        lines.append("  missing docs:")
+        for source, score, reasons, symbols in drift_plan["missing_docs"][:4]:
+            lines.append(f"    - {source}  score={score:.1f}")
+            if reasons:
+                lines.append(f"      why: {', '.join(reasons[:2])}")
     if untested_rows:
         lines.append("  untested impacted files:")
         for source, score, reasons, _ in untested_rows[:5]:
@@ -2406,6 +3007,7 @@ Commands:
   search <terms>          Keyword search across all nodes
   definitions <term>      List matching symbol definitions
   references <label>      List incoming references to a node
+  hierarchy <label>       Show parent/child hierarchy for a symbol/module
   node <label>            Show node details
   explain <label>         Explain a symbol using graph context
   neighbors <label>       Show direct connections
@@ -2414,6 +3016,7 @@ Commands:
   imported-by <label>     Show imports/uses pointing at a node
   tests-for <label>       Show tests touching a symbol
   docs-for <label>        Show docs/specs linked to a symbol/module
+  doc-drift <label>       Detect likely doc/code drift around a symbol/module
   untested-impact <x>     Show impacted code with no related tests
   extended-by <label>     Show classes extending this node
   implements <label>      Show implementers of an interface/protocol
@@ -2444,11 +3047,13 @@ Examples:
   system-wiki query search GraphStore
   system-wiki query definitions GraphStore
   system-wiki query references GraphStore
+  system-wiki query hierarchy GraphStore
   system-wiki query node GraphStore
   system-wiki query explain GraphStore
   system-wiki query callers GraphStore
   system-wiki query tests-for GraphStore
   system-wiki query docs-for --mode feature GraphStore
+  system-wiki query doc-drift --mode feature query_graph.py
   system-wiki query docs-for --type runbook handle_request
   system-wiki query untested-impact GraphStore
   system-wiki query impact GraphStore
@@ -2499,6 +3104,8 @@ def query_main(args: list[str], graph_path: str = "wiki-out/graph.json") -> None
         print(cmd_definitions(G, " ".join(rest)))
     elif cmd == "references" and rest:
         print(cmd_references(G, " ".join(rest)))
+    elif cmd == "hierarchy" and rest:
+        print(cmd_hierarchy(G, " ".join(rest)))
     elif cmd == "node" and rest:
         print(cmd_node(G, " ".join(rest)))
     elif cmd == "explain" and rest:
@@ -2520,6 +3127,16 @@ def query_main(args: list[str], graph_path: str = "wiki-out/graph.json") -> None
             print(f"Unknown mode '{mode}'. Choose one of: {', '.join(sorted(_CONTEXT_MODE_WEIGHTS))}.")
         elif remaining:
             print(cmd_docs_for(G, " ".join(remaining), mode=mode, doc_type=doc_type))
+        else:
+            print(_USAGE)
+    elif cmd == "doc-drift" and rest:
+        mode, remaining = _parse_mode_arg(rest)
+        depth, remaining = _parse_depth_arg(remaining, default=3)
+        doc_type, remaining = _parse_type_arg(remaining)
+        if mode and mode not in _CONTEXT_MODE_WEIGHTS:
+            print(f"Unknown mode '{mode}'. Choose one of: {', '.join(sorted(_CONTEXT_MODE_WEIGHTS))}.")
+        elif remaining:
+            print(cmd_doc_drift(G, " ".join(remaining), mode=mode, max_depth=depth, doc_type=doc_type))
         else:
             print(_USAGE)
     elif cmd == "untested-impact" and rest:
