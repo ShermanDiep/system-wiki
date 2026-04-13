@@ -82,6 +82,8 @@ Useful now:
 
 - `semantics <label>` de xem `semantic_roles` cua code symbol va `workflow/constraint/decision signals` cua document.
 - `graph-diff <before> [after]` de nhin structural delta truoc/sau mot thay doi.
+- `context-for` va `docs-for` hien da boost/surface semantic roles, workflow, constraints, va decisions khi co.
+- `flow`, `callers/callees`, va `tests-for` cung da theo semantic edges nhu `validates/persists/orchestrates`.
 
 ## Package Layout
 

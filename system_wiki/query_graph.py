@@ -170,6 +170,11 @@ _DOC_STRICTNESS: dict[str, float] = {
     "general": 1.0,
 }
 
+_SEMANTIC_EDGE_RELATIONS = {"validates", "persists", "orchestrates"}
+_STRUCTURAL_DEPENDENCY_RELATIONS = {"calls", "imports", "imports_from", "uses", "extends", "implements"}
+_DEPENDENCY_RELATIONS = _STRUCTURAL_DEPENDENCY_RELATIONS | _SEMANTIC_EDGE_RELATIONS
+_TEST_RELEVANT_RELATIONS = {"calls", "imports", "imports_from", "uses", "mentions", "references"} | _SEMANTIC_EDGE_RELATIONS
+
 
 def _load_graph(graph_path: str) -> nx.Graph:
     """Load graph from JSON file, returning a NetworkX graph."""
@@ -506,6 +511,30 @@ def _format_match(G: nx.Graph, nid: str) -> list[str]:
     return lines
 
 
+def _semantic_text(data: dict) -> str:
+    parts: list[str] = []
+    if data.get("semantic_roles"):
+        parts.extend(str(role).lower() for role in data.get("semantic_roles", []))
+    if data.get("workflow_signals"):
+        parts.extend(str(item).lower() for item in data.get("workflow_signals", []))
+    if data.get("constraint_signals"):
+        parts.extend(str(item).lower() for item in data.get("constraint_signals", []))
+    if data.get("decision_signals"):
+        parts.extend(str(item).lower() for item in data.get("decision_signals", []))
+    return " ".join(parts)
+
+
+def _doc_signal_reasons(data: dict) -> list[str]:
+    reasons: list[str] = []
+    if data.get("workflow_signals"):
+        reasons.append("has workflow signals")
+    if data.get("constraint_signals"):
+        reasons.append("has constraint signals")
+    if data.get("decision_signals"):
+        reasons.append("has decision signals")
+    return reasons
+
+
 def _format_edge_list(title: str, G: nx.Graph, edges: list[tuple[str, dict]], direction: str) -> str:
     if not edges:
         return f"{title}\n  None"
@@ -835,7 +864,7 @@ def _public_api_boundary_info(G: nx.Graph, nid: str) -> dict[str, object]:
         reasons.append("public-looking name")
 
     cross_file_callers = {
-        src for src, _ in _incoming_edges(G, nid, {"calls"})
+        src for src, _ in _incoming_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS)
         if G.nodes[src].get("source_file") and G.nodes[src].get("source_file") != source and not _is_test_source(G.nodes[src].get("source_file", ""))
     }
     cross_file_importers = {
@@ -891,7 +920,8 @@ def _lexical_context_score(data: dict, task: str, terms: list[str]) -> tuple[flo
     source = data.get("source_file", "").lower()
     summary = data.get("summary", "").lower()
     description = data.get("description", "").lower()
-    text = " ".join(part for part in (label, qname, source, summary, description) if part)
+    semantic = _semantic_text(data)
+    text = " ".join(part for part in (label, qname, source, summary, description, semantic) if part)
     if not text:
         return 0.0, []
 
@@ -921,6 +951,8 @@ def _lexical_context_score(data: dict, task: str, terms: list[str]) -> tuple[flo
             term_score += 1.5
         if term in description:
             term_score += 1.0
+        if term in semantic:
+            term_score += 2.0
         if term_score > 0:
             matched_terms += 1
             score += term_score
@@ -957,6 +989,14 @@ def _context_mode_bonus(
         subtype_weight = _doc_mode_weight(mode, subtype)
         score += subtype_weight
         reasons.append(f"{_doc_subtype_label(data)} doc")
+        signal_reasons = _doc_signal_reasons(data)
+        if mode in {"feature", "onboarding"} and data.get("workflow_signals"):
+            score += 1.5
+        if mode in {"bugfix", "feature"} and data.get("constraint_signals"):
+            score += 1.0
+        if mode in {"feature", "onboarding", "refactor"} and data.get("decision_signals"):
+            score += 1.25
+        reasons.extend(signal_reasons[:2])
         if mode == "onboarding":
             reasons.append("doc/spec useful for onboarding")
         elif mode == "feature":
@@ -973,10 +1013,10 @@ def _context_mode_bonus(
             score -= 3.0
             reasons.append("test source de-prioritized")
 
-    callers = len(_incoming_edges(G, nid, {"calls"}))
+    callers = len(_incoming_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS))
     importers = len(_incoming_edges(G, nid, {"imports", "imports_from", "uses"}))
-    callees = len(_outgoing_edges(G, nid, {"calls"}))
-    dependencies = len(_outgoing_edges(G, nid, {"imports", "imports_from", "uses"}))
+    callees = len(_outgoing_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS))
+    dependencies = len(_outgoing_edges(G, nid, {"imports", "imports_from", "uses"} | _SEMANTIC_EDGE_RELATIONS))
     entry_score = entrypoint_scores.get(nid, 0.0)
 
     if mode == "bugfix":
@@ -995,6 +1035,9 @@ def _context_mode_bonus(
         if "error" in data.get("label", "").lower() or "fail" in data.get("label", "").lower():
             score += 1.0
             reasons.append("error-oriented name")
+        if "validates" in data.get("semantic_roles", []):
+            score += 1.5
+            reasons.append("validation logic")
     elif mode == "feature":
         if kind == "module":
             score += 4.0
@@ -1012,6 +1055,12 @@ def _context_mode_bonus(
         if entry_score > 0:
             score += min(entry_score / 4.0, 3.0)
             reasons.append("entrypoint-like")
+        if "orchestrates" in data.get("semantic_roles", []):
+            score += 1.75
+            reasons.append("orchestration logic")
+        if "persists" in data.get("semantic_roles", []):
+            score += 1.25
+            reasons.append("persistence touchpoint")
     elif mode == "refactor":
         if kind == "module":
             score += 3.5
@@ -1026,6 +1075,9 @@ def _context_mode_bonus(
             score += min(dependent_count, 5) * 0.9
             reasons.append(f"{dependent_count} upstream dependent(s)")
         score += min(G.degree(nid), 6) * 0.3
+        if data.get("semantic_roles"):
+            score += 1.0
+            reasons.append("semantic role available")
     elif mode == "onboarding":
         if kind == "module":
             score += 4.0
@@ -1041,6 +1093,9 @@ def _context_mode_bonus(
         if entry_score > 0:
             score += min(entry_score / 5.0, 2.0)
             reasons.append("orchestration point")
+        if data.get("semantic_roles"):
+            score += 1.0
+            reasons.append("semantic role available")
 
     if not _is_code_symbol(data):
         score -= 4.0
@@ -1148,7 +1203,7 @@ def _entrypoint_candidates(G: nx.Graph) -> list[tuple[float, str, list[str]]]:
             score += 3
             reasons.append("entry-oriented module path")
 
-        outgoing_calls = len(_outgoing_edges(G, nid, {"calls", "uses", "imports", "imports_from"}))
+        outgoing_calls = len(_outgoing_edges(G, nid, {"calls", "uses", "imports", "imports_from"} | _SEMANTIC_EDGE_RELATIONS))
         if outgoing_calls >= 3:
             score += min(outgoing_calls, 6)
             reasons.append(f"{outgoing_calls} outgoing control/dependency edges")
@@ -1173,7 +1228,7 @@ def _entrypoint_rows_for_target(
     max_depth: int = 4,
 ) -> list[dict]:
     candidates = _entrypoint_candidates(G)
-    relations = {"calls", "uses", "imports", "imports_from"}
+    relations = {"calls", "uses", "imports", "imports_from"} | _SEMANTIC_EDGE_RELATIONS
     M = _build_module_graph(G)
     rows: list[dict] = []
 
@@ -1230,8 +1285,8 @@ def _entrypoint_rows_for_target(
 
 
 def _tests_for_node_map(G: nx.Graph, nid: str, max_depth: int = 3) -> dict[str, int]:
-    direct = _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "mentions", "references"})
-    transitive = _transitive_incoming(G, nid, {"calls", "imports", "imports_from", "uses"}, max_depth=max_depth)
+    direct = _incoming_edges(G, nid, _TEST_RELEVANT_RELATIONS)
+    transitive = _transitive_incoming(G, nid, {"calls", "imports", "imports_from", "uses"} | _SEMANTIC_EDGE_RELATIONS, max_depth=max_depth)
     tests: dict[str, int] = {}
 
     for src, _ in direct:
@@ -1346,6 +1401,9 @@ def _doc_rows_for_target(
         subtype_reason = f"{_doc_subtype_label(doc_data)} doc"
         if subtype_reason not in reasons:
             reasons.append(subtype_reason)
+        for signal_reason in _doc_signal_reasons(doc_data):
+            if signal_reason not in reasons:
+                reasons.append(signal_reason)
         if reason not in reasons:
             reasons.append(reason)
 
@@ -1385,6 +1443,18 @@ def _doc_rows_for_target(
             if _is_doc_node(G.nodes[doc_nid]):
                 add_doc(doc_nid, score, "lexical match")
 
+    for doc_nid, doc_data in G.nodes(data=True):
+        if not _is_doc_node(doc_data):
+            continue
+        if requested_type and _doc_subtype(doc_data) != requested_type:
+            continue
+        if resolved_mode in {"feature", "onboarding"} and doc_data.get("workflow_signals"):
+            add_doc(doc_nid, 1.0, "workflow guidance")
+        if resolved_mode in {"bugfix", "feature"} and doc_data.get("constraint_signals"):
+            add_doc(doc_nid, 0.75, "constraint guidance")
+        if resolved_mode in {"feature", "onboarding", "refactor"} and doc_data.get("decision_signals"):
+            add_doc(doc_nid, 0.75, "decision rationale")
+
     rows = [(doc_nid, doc_scores[doc_nid], doc_reasons.get(doc_nid, [])) for doc_nid in doc_scores]
     rows.sort(key=lambda item: (-item[1], _node_source(G, item[0]), item[0]))
     return rows[:max_docs]
@@ -1401,7 +1471,7 @@ def _impact_dependency_rows(
     seen_direct: set[str] = set()
     seen_transitive: set[str] = set()
 
-    for src, data in _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+    for src, data in _incoming_edges(G, nid, _DEPENDENCY_RELATIONS):
         src_data = G.nodes[src]
         if _is_doc_node(src_data) or _is_test_source(src_data.get("source_file", "")):
             continue
@@ -1412,7 +1482,7 @@ def _impact_dependency_rows(
     transitive = _transitive_incoming(
         G,
         nid,
-        {"calls", "imports", "imports_from", "uses", "extends", "implements"},
+        _DEPENDENCY_RELATIONS,
         max_depth=max_depth,
     )
     for src, depth in transitive.items():
@@ -1531,15 +1601,15 @@ def _drift_important_code_rows(
     if module_nid and module_nid != nid:
         add_row(module_nid, 5.0, "target module")
 
-    for src, _ in _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+    for src, _ in _incoming_edges(G, nid, _DEPENDENCY_RELATIONS):
         add_row(src, 4.5, f"direct dependent on {_node_title(G, nid)}")
-    for tgt, _ in _outgoing_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+    for tgt, _ in _outgoing_edges(G, nid, _DEPENDENCY_RELATIONS):
         add_row(tgt, 3.0, f"dependency of {_node_title(G, nid)}")
 
     transitive = _transitive_incoming(
         G,
         nid,
-        {"calls", "imports", "imports_from", "uses", "extends", "implements"},
+        _DEPENDENCY_RELATIONS,
         max_depth=max_depth,
     )
     for src, depth in transitive.items():
@@ -1785,7 +1855,7 @@ def _impact_file_rows(
         origin_source = data.get("source_file", "")
         boundary = _public_api_boundary_info(G, nid)
 
-        for src, _ in _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}):
+        for src, _ in _incoming_edges(G, nid, _DEPENDENCY_RELATIONS):
             src_data = G.nodes[src]
             source = src_data.get("source_file", "")
             if not source or source == origin_source or _is_test_source(source) or _is_doc_node(src_data):
@@ -1838,7 +1908,7 @@ def _impact_file_rows(
         transitive = _transitive_incoming(
             G,
             nid,
-            {"calls", "imports", "imports_from", "uses", "extends", "implements"},
+            _DEPENDENCY_RELATIONS,
             max_depth=max_depth,
         )
         for src, depth in transitive.items():
@@ -1965,13 +2035,13 @@ def _build_context_bundle(
         if module_nid and module_nid != nid:
             add_candidate(module_nid, weights["module"], f"module for {_node_title(G, nid)}", "module")
 
-        for src, _ in _incoming_edges(G, nid, {"calls"}):
+        for src, _ in _incoming_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS):
             add_candidate(src, weights["caller"], f"calls {_node_title(G, nid)}", "support")
         for src, _ in _incoming_edges(G, nid, {"imports", "imports_from", "uses"}):
             add_candidate(src, weights["importer"], f"depends on {_node_title(G, nid)}", "support")
-        for tgt, _ in _outgoing_edges(G, nid, {"calls"}):
+        for tgt, _ in _outgoing_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS):
             add_candidate(tgt, weights["callee"], f"called by {_node_title(G, nid)}", "support")
-        for tgt, _ in _outgoing_edges(G, nid, {"imports", "imports_from", "uses", "extends", "implements"}):
+        for tgt, _ in _outgoing_edges(G, nid, {"imports", "imports_from", "uses", "extends", "implements"} | _SEMANTIC_EDGE_RELATIONS):
             add_candidate(tgt, weights["dependency"], f"dependency of {_node_title(G, nid)}", "support")
         for doc_nid, _ in _incoming_edges(G, nid, {"mentions", "references"}):
             add_candidate(doc_nid, weights["doc"], f"documents {_node_title(G, nid)}", "doc")
@@ -2067,6 +2137,8 @@ def cmd_context_for(G: nx.Graph, task: str, mode: str | None = None, max_depth: 
             lines.append(f"  - {_node_title(G, nid)}  [{kind}]  [{_node_source(G, nid)}]  score={score:.1f}")
             if data.get("summary"):
                 lines.append(f"    summary: {data['summary']}")
+            if data.get("semantic_roles"):
+                lines.append(f"    semantics: {', '.join(data['semantic_roles'][:3])}")
             if reasons:
                 lines.append(f"    why: {', '.join(reasons[:3])}")
     elif bundle["seeds"]:
@@ -2104,8 +2176,18 @@ def cmd_context_for(G: nx.Graph, task: str, mode: str | None = None, max_depth: 
     if bundle["docs"]:
         lines.append("Docs/specs:")
         for nid, _, reasons in bundle["docs"]:
-            subtype = _doc_subtype_label(G.nodes[nid])
+            data = G.nodes[nid]
+            subtype = _doc_subtype_label(data)
             lines.append(f"  - {_node_title(G, nid)}  [{subtype}]  [{_node_source(G, nid)}]")
+            signal_bits = []
+            if data.get("workflow_signals"):
+                signal_bits.append("workflow")
+            if data.get("constraint_signals"):
+                signal_bits.append("constraints")
+            if data.get("decision_signals"):
+                signal_bits.append("decisions")
+            if signal_bits:
+                lines.append(f"    signals: {', '.join(signal_bits)}")
             if reasons:
                 lines.append(f"    why: {', '.join(reasons[:2])}")
 
@@ -2138,6 +2220,15 @@ def cmd_docs_for(G: nx.Graph, label: str, mode: str | None = None, doc_type: str
         )
         if data.get("summary"):
             lines.append(f"    summary: {data['summary']}")
+        signal_bits = []
+        if data.get("workflow_signals"):
+            signal_bits.append("workflow")
+        if data.get("constraint_signals"):
+            signal_bits.append("constraints")
+        if data.get("decision_signals"):
+            signal_bits.append("decisions")
+        if signal_bits:
+            lines.append(f"    signals: {', '.join(signal_bits)}")
         if reasons:
             lines.append(f"    why: {', '.join(reasons[:3])}")
     return "\n".join(lines)
@@ -2624,7 +2715,7 @@ def cmd_callers(G: nx.Graph, label: str) -> str:
     if not matches:
         return f"No node matching '{label}'."
     nid = matches[0]
-    return _format_edge_list(f"Callers of {_node_title(G, nid)}:", G, _incoming_edges(G, nid, {"calls"}), "in")
+    return _format_edge_list(f"Callers of {_node_title(G, nid)}:", G, _incoming_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS), "in")
 
 
 def cmd_callees(G: nx.Graph, label: str) -> str:
@@ -2632,7 +2723,7 @@ def cmd_callees(G: nx.Graph, label: str) -> str:
     if not matches:
         return f"No node matching '{label}'."
     nid = matches[0]
-    return _format_edge_list(f"Callees of {_node_title(G, nid)}:", G, _outgoing_edges(G, nid, {"calls"}), "out")
+    return _format_edge_list(f"Callees of {_node_title(G, nid)}:", G, _outgoing_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS), "out")
 
 
 def cmd_imported_by(G: nx.Graph, label: str) -> str:
@@ -2997,7 +3088,7 @@ def cmd_flow(G: nx.Graph, label: str, max_depth: int = 3) -> str:
                     lines.append(f"  - {M.nodes[other].get('source_file', other)}  [{depth}-hop]")
             return "\n".join(lines)
 
-        relations = {"calls", "uses", "imports", "imports_from"}
+        relations = {"calls", "uses", "imports", "imports_from", "validates", "persists", "orchestrates"}
         direct = _outgoing_edges(G, nid, relations)
         transitive = _transitive_outgoing(G, nid, relations, max_depth=max_depth)
         lines = [f"Flow from {_node_title(G, nid)}:"]
@@ -3097,6 +3188,14 @@ def cmd_why_related(G: nx.Graph, source: str, target: str) -> str:
             for nid in sorted(shared, key=lambda n: _node_title(G, n).lower())[:8]:
                 lines.append(f"  - {_node_title(G, nid)}")
             return "\n".join(lines)
+        shared_roles = sorted(
+            set(G.nodes[src_nid].get("semantic_roles", [])) & set(G.nodes[tgt_nid].get("semantic_roles", []))
+        )
+        if shared_roles:
+            return (
+                f"{_node_title(G, src_nid)} and {_node_title(G, tgt_nid)} share semantic roles: "
+                f"{', '.join(shared_roles[:4])}."
+            )
         if G.nodes[src_nid].get("community") == G.nodes[tgt_nid].get("community"):
             return (
                 f"{_node_title(G, src_nid)} and {_node_title(G, tgt_nid)} are in the same community "
@@ -3112,8 +3211,8 @@ def cmd_tests_for(G: nx.Graph, label: str) -> str:
     if not matches:
         return f"No node matching '{label}'."
     nid = matches[0]
-    direct = _incoming_edges(G, nid, {"calls", "imports", "imports_from", "uses", "mentions", "references"})
-    transitive = _transitive_incoming(G, nid, {"calls", "imports", "imports_from", "uses"}, max_depth=3)
+    direct = _incoming_edges(G, nid, _TEST_RELEVANT_RELATIONS)
+    transitive = _transitive_incoming(G, nid, {"calls", "imports", "imports_from", "uses"} | _SEMANTIC_EDGE_RELATIONS, max_depth=3)
 
     tests: dict[str, int] = {}
     for src, _ in direct:
@@ -3165,13 +3264,13 @@ def cmd_impact(G: nx.Graph, label: str) -> str:
     if not matches:
         return f"No node matching '{label}'."
     nid = matches[0]
-    callers = _incoming_edges(G, nid, {"calls"})
+    callers = _incoming_edges(G, nid, {"calls"} | _SEMANTIC_EDGE_RELATIONS)
     importers = _incoming_edges(G, nid, {"imports", "imports_from", "uses"})
     subclasses = _incoming_edges(G, nid, {"extends"})
     implementers = _incoming_edges(G, nid, {"implements"})
     doc_mentions = _incoming_edges(G, nid, {"mentions", "references"})
     tests = [(src, data) for src, data in callers + importers + doc_mentions if _is_test_source(G.nodes[src].get("source_file", ""))]
-    transitive = _transitive_incoming(G, nid, {"calls", "imports", "imports_from", "uses", "extends", "implements"}, max_depth=3)
+    transitive = _transitive_incoming(G, nid, _DEPENDENCY_RELATIONS, max_depth=3)
     direct_sources = {src for src, _ in callers + importers + subclasses + implementers}
     transitive_only = {src: depth for src, depth in transitive.items() if src not in direct_sources}
     impacted_nodes = {src for src, _ in callers + importers + subclasses + implementers + doc_mentions}
@@ -3390,11 +3489,13 @@ Examples:
   system-wiki query callers GraphStore
   system-wiki query tests-for GraphStore
   system-wiki query docs-for --mode feature GraphStore
+  system-wiki query docs-for --mode feature create_order
   system-wiki query doc-drift --mode feature query_graph.py
   system-wiki query docs-for --type runbook handle_request
   system-wiki query untested-impact GraphStore
   system-wiki query impact GraphStore
   system-wiki query graph-diff wiki-out/graph-before.json
+  system-wiki query semantics query_graph.py
   system-wiki query files-for-change --mode refactor "simplify query graph ranking"
   system-wiki query verify-after-change --mode bugfix "fix query path ranking"
   system-wiki query file src/graph_store.py

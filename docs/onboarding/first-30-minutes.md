@@ -115,6 +115,8 @@ Neu ban dinh sua `query_graph.py`, nen chay them:
 ```bash
 system-wiki query impact query_graph.py
 system-wiki query semantics query_graph.py
+system-wiki query docs-for --mode feature query_graph.py
+system-wiki query tests-for query_graph.py
 system-wiki query graph-diff wiki-out/graph-before.json
 ```
 
@@ -147,6 +149,8 @@ system-wiki query files-for-change "<task>"
 system-wiki query verify-after-change --mode feature "<task>"
 system-wiki query impact query_graph.py
 system-wiki query semantics query_graph.py
+system-wiki query docs-for --mode feature query_graph.py
+system-wiki query tests-for query_graph.py
 system-wiki query graph-diff wiki-out/graph-before.json
 system-wiki eval
 ```

@@ -10,10 +10,12 @@ from system_wiki.query_graph import (
     cmd_doc_drift,
     cmd_docs_for,
     cmd_files_for_change,
+    cmd_flow,
     cmd_hierarchy,
     cmd_impact,
     cmd_references,
     cmd_semantics,
+    cmd_tests_for,
     cmd_untested_impact,
     cmd_verify_after_change,
 )
@@ -679,6 +681,45 @@ class ContextForTests(unittest.TestCase):
         self.assertIn("workflow signals:", result)
         self.assertIn("constraint signals:", result)
         self.assertIn("decision signals:", result)
+
+    def test_context_for_surfaces_semantic_roles(self) -> None:
+        graph = _build_public_api_graph()
+        graph.nodes["public_fn"]["semantic_roles"] = ["orchestrates", "persists"]
+
+        result = cmd_context_for(graph, "extend create_order API", mode="feature")
+
+        self.assertIn("create_order()", result)
+        self.assertIn("semantics: orchestrates, persists", result)
+
+    def test_docs_for_surfaces_doc_signal_summary(self) -> None:
+        graph = _build_graph()
+        graph.nodes["doc_spec"]["workflow_signals"] = ["Validate request before dispatch"]
+        graph.nodes["doc_spec"]["decision_signals"] = ["We chose a request routing boundary"]
+
+        result = cmd_docs_for(graph, "handle_request", mode="feature")
+
+        self.assertIn("Service Feature Spec", result)
+        self.assertIn("signals: workflow, decisions", result)
+        self.assertIn("has decision signals", result)
+
+    def test_flow_includes_semantic_edges(self) -> None:
+        graph = _build_public_api_graph()
+        _add_edge(graph, "public_fn", "router_fn", "orchestrates")
+
+        result = cmd_flow(graph, "create_order")
+
+        self.assertIn("Flow from create_order():", result)
+        self.assertIn("route_request()", result)
+        self.assertIn("[orchestrates]", result)
+
+    def test_tests_for_finds_semantic_test_relations(self) -> None:
+        graph = _build_graph()
+        _add_edge(graph, "test_fn", "helper_fn", "validates")
+
+        result = cmd_tests_for(graph, "validate_input")
+
+        self.assertIn("Tests for validate_input():", result)
+        self.assertIn("test_handle_request()", result)
 
     def test_files_for_change_includes_public_api_boundary_review(self) -> None:
         graph = _build_public_api_graph()

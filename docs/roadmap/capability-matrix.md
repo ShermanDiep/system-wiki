@@ -17,7 +17,7 @@ Tai lieu nay chot "done" theo 4 cau hoi lon trong `CODEBASE_UNDERSTANDING_PLAN.m
 | --- | --- | --- |
 | Explain symbol | Good | `explain` + summary metadata da co, summary heuristic da phu module/class/function/method |
 | Summary-first task context | Good | `context-for` da group focus/files/tests/docs theo mode |
-| Typed semantic edges | Good | da co heuristic semantic edges `validates`, `persists`, `orchestrates` va surfacing qua summary metadata |
+| Typed semantic edges | Good | da co heuristic semantic edges `validates`, `persists`, `orchestrates`; duoc surfacing qua summary metadata va reused trong `context-for`, `docs-for`, `flow`, `tests-for` |
 | File/class/function summaries | Good | summary heuristic da tong hop tu container, methods, calls, dependencies, callers, va signatures |
 
 ## Dependency And Flow
