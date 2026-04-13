@@ -45,6 +45,10 @@ Smoke test:
 scripts/smoke-test.sh .
 ```
 
+New here?
+
+- Start with [docs/onboarding/first-30-minutes.md](/Users/diephung/Downloads/my-llm-wiki-main/system-wiki/docs/onboarding/first-30-minutes.md)
+
 ## CLI
 
 ```bash
@@ -60,6 +64,7 @@ system-wiki query module-path A B # shortest path between modules
 system-wiki query module-hotspots # rank heavily connected modules
 system-wiki query module-bridges  # rank bridge modules
 system-wiki query docs-for --mode onboarding --type readme main
+system-wiki query doc-drift --mode feature query_graph.py
 system-wiki query untested-impact <symbol>
 system-wiki query verify-after-change --mode bugfix "<task>"
 system-wiki eval                  # run starter benchmarks, fail on regression
@@ -76,6 +81,7 @@ system-wiki note "<insight>"      # write back insight
 ```text
 system-wiki/
   system_wiki/                    # core package
+  docs/onboarding/                # practical reading path for new developers
   docs/roadmap/                   # capability matrix + progress checklist
   scripts/
   CODEBASE_UNDERSTANDING_PLAN.md  # roadmap for the new direction
